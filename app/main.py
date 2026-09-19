@@ -1,5 +1,9 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes import router as api_router
 from app.core.config import settings
@@ -9,8 +13,8 @@ from app.core.logging_config import logger
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Talking to Bridges API Server")
-    logger.info(f"Ollama Target URL: {settings.OLLAMA_BASE_URL}")
-    logger.info(f"Ollama Target Model: {settings.OLLAMA_MODEL}")
+    logger.info(f"Groq Target URL: {settings.GROQ_BASE_URL}")
+    logger.info(f"Groq Target Model: {settings.GROQ_MODEL}")
     yield
     logger.info("Shutting down Talking to Bridges API Server")
 
@@ -24,6 +28,30 @@ app = FastAPI(
 
 app.include_router(api_router)
 
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"message": str(exc.detail), "type": "HTTPException"}},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"error": {"message": "Invalid request parameters", "details": exc.errors(), "type": "ValidationError"}},
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled application error")
+    return JSONResponse(
+        status_code=500,
+        content={"error": {"message": "Internal server error", "type": "InternalError"}},
+    )
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,97 +1,128 @@
 import httpx
+
 from app.core.config import settings
 from app.core.logging_config import logger
 
 
-class OllamaServiceError(Exception):
-    """Base exception for Ollama LLM service failures."""
-
-    pass
+class GroqServiceError(Exception):
+    """Base exception for Groq API failures."""
 
 
-class OllamaUnavailableError(OllamaServiceError):
-    """Raised when Ollama service is offline or unreachable."""
-
-    pass
+class GroqUnavailableError(GroqServiceError):
+    """Raised when the Groq API is unreachable or credentials are missing."""
 
 
-class OllamaModelNotFoundError(OllamaServiceError):
-    """Raised when the specified model is not found in Ollama."""
-
-    pass
+class GroqModelNotFoundError(GroqServiceError):
+    """Raised when the configured Groq model is not available."""
 
 
-class OllamaLLMService:
-    """Service abstraction for communicating with local Ollama HTTP API."""
+class GroqLLMService:
+    """Service abstraction for Groq's OpenAI-compatible API."""
 
     def __init__(
         self,
         base_url: str | None = None,
+        api_key: str | None = None,
         model: str | None = None,
         timeout: float = 60.0,
     ):
-        self.base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
-        self.model = model or settings.OLLAMA_MODEL
+        self.base_url = (base_url or settings.GROQ_BASE_URL).rstrip("/")
+        self.api_key = api_key if api_key is not None else settings.GROQ_API_KEY
+        self.model = model or settings.GROQ_MODEL
         self.timeout = timeout
 
-    async def health_check(self) -> bool:
-        """Checks whether the Ollama server is reachable and responsive."""
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(f"{self.base_url}/api/tags")
-                return response.status_code == 200
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError) as e:
-            logger.warning(f"Ollama health check failed: {e}")
-            return False
-
-    async def generate(self, prompt: str) -> str:
-        """Sends prompt to local Ollama model and returns text output.
-
-        Args:
-            prompt: User message string.
-
-        Returns:
-            Generated text string from the model.
-
-        Raises:
-            OllamaUnavailableError: If Ollama server is unreachable.
-            OllamaModelNotFoundError: If requested model is not found.
-            OllamaServiceError: For timeouts or other API errors.
-        """
-        url = f"{self.base_url}/api/generate"
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
+    @property
+    def headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
         }
 
+    async def health_check(self) -> bool:
+        """Check whether the configured Groq API credentials and endpoint work."""
+        if not self.api_key:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    f"{self.base_url}/models", headers=self.headers
+                )
+                return response.status_code == 200
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError) as error:
+            logger.warning(f"Groq health check failed: {error}")
+            return False
+
+    async def list_models(self) -> list[str]:
+        """Return model IDs available to the configured Groq API key."""
+        if not self.api_key:
+            raise GroqUnavailableError("Groq API key is not configured")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    f"{self.base_url}/models", headers=self.headers
+                )
+                if response.status_code == 401:
+                    raise GroqUnavailableError("Groq API key is invalid")
+                if response.status_code != 200:
+                    raise GrokServiceError(
+                        f"Groq model listing failed with status {response.status_code}"
+                    )
+                return [
+                    model["id"]
+                    for model in response.json().get("data", [])
+                    if model.get("id")
+                ]
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+            logger.error(f"Connection failure to Groq at {self.base_url}: {error}")
+            raise GroqUnavailableError("Groq API is unavailable")
+        except httpx.TimeoutException as error:
+            logger.error(f"Groq model listing timed out: {error}")
+            raise GroqServiceError("Groq model listing timed out")
+        except httpx.RequestError as error:
+            logger.error(f"Groq model listing request failed: {error}")
+            raise GroqServiceError("Failed to list Groq models")
+
+    async def generate(self, prompt: str) -> str:
+        """Generate a response from the configured Groq model."""
+        if not self.api_key:
+            raise GroqUnavailableError("Groq API key is not configured")
+
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, json=payload)
-
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=self.headers,
+                    json=payload,
+                )
+                if response.status_code in (401, 403):
+                    raise GroqUnavailableError("Groq API key is invalid")
                 if response.status_code == 404:
-                    logger.error(f"Ollama model '{self.model}' not found.")
-                    raise OllamaModelNotFoundError(
-                        f"Model '{self.model}' not found in local Ollama instance."
+                    raise GroqModelNotFoundError(
+                        f"Model '{self.model}' was not found in the Groq API."
                     )
-
                 if response.status_code != 200:
                     logger.error(
-                        f"Ollama returned status {response.status_code}: {response.text}"
+                        f"Groq returned status {response.status_code}: {response.text}"
                     )
-                    raise OllamaServiceError(
-                        f"Ollama error status: {response.status_code}"
+                    raise GroqServiceError(
+                        f"Groq API error status: {response.status_code}"
                     )
 
-                data = response.json()
-                return data.get("response", "")
-
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            logger.error(f"Connection failure to Ollama at {self.base_url}: {e}")
-            raise OllamaUnavailableError("Local LLM service is unavailable")
-        except httpx.TimeoutException as e:
-            logger.error(f"Ollama generation request timed out: {e}")
-            raise OllamaServiceError("Local LLM request timed out")
-        except httpx.RequestError as e:
-            logger.error(f"Ollama network request error: {e}")
-            raise OllamaServiceError("Failed to communicate with local LLM service")
+                choices = response.json().get("choices", [])
+                if not choices or not choices[0].get("message", {}).get("content"):
+                    raise GroqServiceError("Groq returned an empty response")
+                return choices[0]["message"]["content"]
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+            logger.error(f"Connection failure to Groq at {self.base_url}: {error}")
+            raise GroqUnavailableError("Groq API is unavailable")
+        except httpx.TimeoutException as error:
+            logger.error(f"Groq generation request timed out: {error}")
+            raise GroqServiceError("Groq request timed out")
+        except httpx.RequestError as error:
+            logger.error(f"Groq request failed: {error}")
+            raise GroqServiceError("Failed to communicate with Groq")
