@@ -8,6 +8,14 @@ class Settings(BaseSettings):
     APP_HOST: str = "127.0.0.1"
     APP_PORT: int = 8000
 
+    # RAG & Embedding Configuration
+    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 150
+    VECTOR_DB_PATH: str = "data/vector_db"
+    DOCUMENTS_DIR: str = "data/documents"
+    PROCESSED_DIR: str = "data/processed"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

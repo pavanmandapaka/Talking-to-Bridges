@@ -33,11 +33,12 @@ wheels/
 htmlcov/
 
 # Data & Vector Storage
+data/documents/*
 data/processed/*
 data/vector_db/*
+!data/documents/.gitkeep
 !data/processed/.gitkeep
 !data/vector_db/.gitkeep
-!data/documents/.gitkeep
 
 # IDEs & Editors
 .vscode/

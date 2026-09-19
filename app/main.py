@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routes import router as api_router
+from app.api.routes import router as api_router, vector_store
 from app.core.config import settings
 from app.core.logging_config import logger
 
@@ -15,6 +15,12 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Talking to Bridges API Server")
     logger.info(f"Groq Target URL: {settings.GROQ_BASE_URL}")
     logger.info(f"Groq Target Model: {settings.GROQ_MODEL}")
+    # Load persistent vector database if available
+    loaded = vector_store.load()
+    if loaded:
+        logger.info(f"Vector store loaded with {vector_store.total_vectors} chunks")
+    else:
+        logger.info("Vector store initialized (empty)")
     yield
     logger.info("Shutting down Talking to Bridges API Server")
 
