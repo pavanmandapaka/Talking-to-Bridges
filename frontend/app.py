@@ -28,7 +28,7 @@ if "uploaded_doc" not in st.session_state:
 with st.sidebar:
     st.header("Groq Connection")
     try:
-        health_response = httpx.get(f"{API_BASE_URL}/health", timeout=5.0)
+        health_response = httpx.get(f"{API_BASE_URL}/health", timeout=120.0)
         if health_response.status_code == 200 and health_response.json().get(
             "groq_connected", False
         ):
@@ -53,7 +53,7 @@ with st.sidebar:
                         uploaded_file.type or "application/octet-stream",
                     )
                 }
-                response = httpx.post(f"{API_BASE_URL}/upload", files=files, timeout=60.0)
+                response = httpx.post(f"{API_BASE_URL}/upload", files=files, timeout=120.0)
                 if response.status_code == 200:
                     data = response.json()
                     st.session_state.messages = []
@@ -107,7 +107,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if "audio" in msg:
-            st.audio(msg["audio"], format="audio/wav")
+            st.audio(msg["audio"], format=msg.get("content_type", "audio/wav"))
 
 if prompt := st.chat_input("Ask a question about the bridge data..."):
     # Append user message
@@ -115,13 +115,31 @@ if prompt := st.chat_input("Ask a question about the bridge data..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
+audio_value = st.audio_input("Or speak your question...")
+if audio_value:
+    with st.spinner("Transcribing your voice..."):
+        try:
+            files = {"audio": ("mic_recording.wav", audio_value.getvalue(), "audio/wav")}
+            transcribe_resp = httpx.post(f"{API_BASE_URL}/transcribe", files=files, timeout=120.0)
+            if transcribe_resp.status_code == 200:
+                prompt = transcribe_resp.json().get("text", "")
+                st.session_state.messages.append({"role": "user", "content": f"🎤 *{prompt}*"})
+                with st.chat_message("user"):
+                    st.markdown(f"🎤 *{prompt}*")
+            else:
+                st.error("Failed to transcribe audio.")
+        except Exception as e:
+            st.error(f"Error connecting to STT API: {e}")
+
+if prompt:
+
     # Call backend for chat response
     with st.chat_message("assistant"), st.spinner("Thinking..."):
         try:
             chat_resp = httpx.post(
                 f"{API_BASE_URL}/api/chat",
                 json={"message": prompt},
-                timeout=60.0,
+                timeout=120.0,
             )
             if chat_resp.status_code == 200:
                 answer = chat_resp.json().get("answer", "No answer provided.")
@@ -131,19 +149,21 @@ if prompt := st.chat_input("Ask a question about the bridge data..."):
                 speak_resp = httpx.post(
                     f"{API_BASE_URL}/speak",
                     json={"message": answer},
-                    timeout=30.0,
+                    timeout=120.0,
                 )
                 audio_bytes = None
                 if speak_resp.status_code == 200:
                     audio_base64 = speak_resp.json().get("audio_base64")
+                    content_type = speak_resp.json().get("content_type", "audio/wav")
                     if audio_base64:
                         audio_bytes = base64.b64decode(audio_base64)
-                        st.audio(audio_bytes, format="audio/wav")
+                        st.audio(audio_bytes, format=content_type)
 
                 # Store to history
                 msg_data = {"role": "assistant", "content": answer}
                 if audio_bytes:
                     msg_data["audio"] = audio_bytes
+                    msg_data["content_type"] = content_type
                 st.session_state.messages.append(msg_data)
             else:
                 error_data = chat_resp.json()

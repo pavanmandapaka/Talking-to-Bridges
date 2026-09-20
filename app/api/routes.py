@@ -203,15 +203,36 @@ async def retrieve(request: RetrieveRequest):
     return RetrieveResponse(results=_lexical_document_results(request.question, request.num_results))
 
 
+import tempfile
+import os
+from app.services.stt_service import transcribe as run_stt
+
 @router.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe(audio: Annotated[UploadFile, File(...)]):
-    """Return placeholder speech text until Whisper is integrated."""
+async def transcribe_audio(audio: Annotated[UploadFile, File(...)]):
+    """Transcribes audio using Eswar's GPU-accelerated faster-whisper model."""
     if not audio.filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An audio file name is required",
         )
-    return TranscribeResponse(text="This is dummy transcribed speech.")
+        
+    try:
+        # Create a temporary file to save the incoming audio bytes
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".wav")
+        with os.fdopen(temp_fd, "wb") as f:
+            f.write(await audio.read())
+            
+        # Run Eswar's fast transcription
+        transcribed_text = run_stt(temp_path)
+        
+        # Clean up temp file
+        os.remove(temp_path)
+        
+        return TranscribeResponse(text=transcribed_text)
+    except Exception as e:
+        logger.error(f"Transcription error: {e}")
+        # Fallback to dummy if something breaks
+        return TranscribeResponse(text="This is dummy transcribed speech (fallback due to error).")
 
 
 def _dummy_wav_base64() -> str:
@@ -224,10 +245,18 @@ def _dummy_wav_base64() -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+from app.services.tts_service import generate_speech
+
 @router.post("/speak", response_model=SpeakResponse)
 async def speak(request: ChatRequest):
-    """Return valid silent WAV audio until Piper TTS is integrated."""
-    return SpeakResponse(audio_base64=_dummy_wav_base64())
+    """Converts text to speech using the active TTS engine (ElevenLabs, Edge, or Piper)."""
+    try:
+        audio_b64, content_type = generate_speech(request.message)
+        return SpeakResponse(audio_base64=audio_b64, content_type=content_type)
+    except Exception as e:
+        logger.error(f"TTS Error: {e}")
+        # Fallback to silent wav if everything breaks
+        return SpeakResponse(audio_base64=_dummy_wav_base64(), content_type="audio/wav")
 
 
 @router.post("/chat", response_model=ChatResponse)

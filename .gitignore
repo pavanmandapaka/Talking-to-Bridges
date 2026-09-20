@@ -46,3 +46,7 @@ data/vector_db/*
 *.swp
 *.swo
 .DS_Store
+
+# Speech models
+*.onnx
+*.onnx.json
