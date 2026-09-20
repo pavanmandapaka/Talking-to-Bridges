@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import re
@@ -159,18 +160,44 @@ async def upload(file: Annotated[UploadFile, File(...)]):
     return UploadResponse(document_id=document_id, chunks_created=ingest_result.chunks_created)
 
 
+def _get_all_chunks() -> list[ChunkResponse]:
+    """Retrieve all available document chunks from active uploads or loaded vector store metadata."""
+    if _uploaded_documents:
+        return [chunk for document in _uploaded_documents.values() for chunk in document]
+    if vector_store and vector_store.metadata:
+        return [
+            ChunkResponse(
+                text=m.get("text", ""),
+                source_file=m.get("source_file", ""),
+                page_number=m.get("page_number", 1),
+                chunk_id=m.get("chunk_id", ""),
+            )
+            for m in vector_store.metadata
+        ]
+    return []
+
+
 def _lexical_document_results(question: str, limit: int = 3) -> list[RetrievalResult]:
-    """Fallback lexical search across in-memory document chunks."""
-    chunks = [chunk for document in _uploaded_documents.values() for chunk in document]
+    """Fallback lexical search across in-memory or persisted document chunks."""
+    chunks = _get_all_chunks()
     if not chunks:
         return []
 
-    terms = set(re.findall(r"[a-z0-9]+", question.lower()))
+    clean_question = question.strip() if question else ""
+    if not clean_question:
+        return []
+
+    terms = set(re.findall(r"[a-z0-9]+", clean_question.lower()))
+    if not terms:
+        return []
+
     scored = []
     for chunk in chunks:
         chunk_terms = set(re.findall(r"[a-z0-9]+", chunk.text.lower()))
-        score = len(terms & chunk_terms) / max(len(terms), 1)
-        scored.append(RetrievalResult(chunk=chunk, score=score))
+        matched = terms & chunk_terms
+        if matched:
+            score = len(matched) / max(len(terms), 1)
+            scored.append(RetrievalResult(chunk=chunk, score=score))
     scored.sort(key=lambda result: (-result.score, result.chunk.chunk_id))
     if any(word in terms for word in {"summarize", "summary", "overview", "describe"}):
         return scored
@@ -180,8 +207,12 @@ def _lexical_document_results(question: str, limit: int = 3) -> list[RetrievalRe
 @router.post("/retrieve", response_model=RetrieveResponse)
 async def retrieve(request: RetrieveRequest):
     """Retrieve relevant document chunks using FAISS semantic vector search."""
+    clean_question = request.question.strip()
+    if not clean_question:
+        return RetrieveResponse(results=[])
+
     try:
-        retrieved_chunks = retriever.retrieve(request.question, top_k=request.num_results)
+        retrieved_chunks = retriever.retrieve(clean_question, top_k=request.num_results)
         if retrieved_chunks:
             results = [
                 RetrievalResult(
@@ -200,7 +231,7 @@ async def retrieve(request: RetrieveRequest):
         logger.warning(f"Vector search failed, falling back to lexical search: {e}")
 
     # Fallback to lexical results if vector search yielded no results
-    return RetrieveResponse(results=_lexical_document_results(request.question, request.num_results))
+    return RetrieveResponse(results=_lexical_document_results(clean_question, request.num_results))
 
 
 import tempfile
@@ -217,18 +248,28 @@ async def transcribe_audio(audio: Annotated[UploadFile, File(...)]):
         )
         
     try:
+        content = await audio.read()
+        if len(content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded audio file is empty.",
+            )
+
         # Create a temporary file to save the incoming audio bytes
         temp_fd, temp_path = tempfile.mkstemp(suffix=".wav")
         with os.fdopen(temp_fd, "wb") as f:
-            f.write(await audio.read())
+            f.write(content)
             
         # Run Eswar's fast transcription
-        transcribed_text = run_stt(temp_path)
-        
-        # Clean up temp file
-        os.remove(temp_path)
+        try:
+            transcribed_text = run_stt(temp_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
         
         return TranscribeResponse(text=transcribed_text)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Transcription error: {e}")
         # Fallback to dummy if something breaks
@@ -250,8 +291,14 @@ from app.services.tts_service import generate_speech
 @router.post("/speak", response_model=SpeakResponse)
 async def speak(request: ChatRequest):
     """Converts text to speech using the active TTS engine (ElevenLabs, Edge, or Piper)."""
+    clean_message = request.message.strip()
+    if not clean_message:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message cannot be empty",
+        )
     try:
-        audio_b64, content_type = generate_speech(request.message)
+        audio_b64, content_type = await asyncio.to_thread(generate_speech, clean_message)
         return SpeakResponse(audio_base64=audio_b64, content_type=content_type)
     except Exception as e:
         logger.error(f"TTS Error: {e}")
@@ -264,11 +311,18 @@ async def speak(request: ChatRequest):
 async def chat(request: ChatRequest):
     """Processes user query, retrieves relevant document chunks, and generates an answer from Groq."""
     logger.info("Received request on POST /api/chat")
+    clean_message = request.message.strip()
+    if not clean_message:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message cannot be empty or whitespace only",
+        )
+
     try:
         # Retrieve context via semantic vector search or fallback
         retrieved_chunks: list[RetrievalResult] = []
         try:
-            semantic_results = retriever.retrieve(request.message, top_k=3)
+            semantic_results = retriever.retrieve(clean_message, top_k=3)
             if semantic_results:
                 retrieved_chunks = [
                     RetrievalResult(
@@ -286,7 +340,7 @@ async def chat(request: ChatRequest):
             logger.warning(f"Vector retrieval failed for chat query: {e}")
 
         if not retrieved_chunks:
-            retrieved_chunks = _lexical_document_results(request.message, limit=3)
+            retrieved_chunks = _lexical_document_results(clean_message, limit=3)
 
         if retrieved_chunks:
             context = "\n\n".join(
@@ -295,13 +349,15 @@ async def chat(request: ChatRequest):
                 for result in retrieved_chunks
             )
             prompt = (
-                "Answer the user's question using only the document context below. "
-                "For a summary, cover the main points from all provided context. "
-                "If the answer is not in the context, say so clearly.\n\n"
-                f"Document context:\n{context}\n\nUser question: {request.message}"
+                "You are a helpful assistant for the Talking to Bridges platform.\n"
+                "Answer the user's question accurately using the document context below when relevant.\n"
+                "If the user query is a greeting or general pleasantry, respond politely and invite questions about the bridge.\n"
+                "If the user asks for information not present in the context, state clearly that the document does not contain that information.\n"
+                "For a summary, cover the main points from all provided context.\n\n"
+                f"Document context:\n{context}\n\nUser question: {clean_message}"
             )
         else:
-            prompt = request.message
+            prompt = clean_message
 
         answer = await llm_service.generate(prompt)
         return ChatResponse(

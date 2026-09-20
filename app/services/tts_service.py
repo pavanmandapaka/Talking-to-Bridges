@@ -73,7 +73,18 @@ def _speak_edge(text: str) -> tuple[str, str]:
                 audio_data += chunk["data"]
         return audio_data
 
-    audio_bytes = asyncio.run(generate_edge())
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            audio_bytes = pool.submit(lambda: asyncio.run(generate_edge())).result()
+    else:
+        audio_bytes = asyncio.run(generate_edge())
+
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
     return audio_b64, "audio/mpeg"
 
@@ -110,6 +121,9 @@ def generate_speech(text: str, engine: str = None) -> tuple[str, str]:
     What goes in: Text
     What comes out: Audio (Base64), Content-Type
     """
+    if not text or not text.strip():
+        raise ValueError("Cannot synthesize speech from empty text.")
+
     engine = engine or DEFAULT_TTS_ENGINE
     
     print(f"[TTS Service] Generating speech using engine: {engine}")

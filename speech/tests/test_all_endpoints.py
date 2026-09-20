@@ -236,14 +236,16 @@ class TestSpeakEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert "audio_base64" in body
-        assert body["content_type"] == "audio/wav"
-        # Verify it's valid base64 that decodes to a valid WAV
+        assert body["content_type"] in ("audio/wav", "audio/mpeg")
+        # Verify it's valid base64 that decodes to audio data
         audio_bytes = base64.b64decode(body["audio_base64"])
-        buf = io.BytesIO(audio_bytes)
-        with wave.open(buf, "rb") as wf:
-            assert wf.getnchannels() == 1
-            assert wf.getsampwidth() == 2
-            assert wf.getframerate() == 16000
+        assert len(audio_bytes) > 0
+        if body["content_type"] == "audio/wav":
+            buf = io.BytesIO(audio_bytes)
+            with wave.open(buf, "rb") as wf:
+                assert wf.getnchannels() == 1
+                assert wf.getsampwidth() == 2
+                assert wf.getframerate() == 16000
 
     def test_speak_empty_message_returns_422(self):
         resp = client.post("/speak", json={"message": ""})
@@ -286,3 +288,34 @@ class TestErrorFormat:
         assert "error" in body
         assert "message" in body["error"]
         assert "type" in body["error"]
+
+
+# ──────────────────────────────────────────────
+# Week 4 Phase 1 Conversational Regression Tests
+# ──────────────────────────────────────────────
+
+
+class TestWeek4ConversationalFixes:
+    def test_chat_whitespace_only_returns_400(self):
+        resp = client.post("/chat", json={"message": "   "})
+        assert resp.status_code == 400
+        assert "empty or whitespace" in resp.json()["error"]["message"]
+
+    def test_retrieve_whitespace_only_returns_empty_results(self):
+        resp = client.post("/retrieve", json={"question": "   "})
+        assert resp.status_code == 200
+        assert resp.json()["results"] == []
+
+    def test_transcribe_empty_file_returns_400(self):
+        resp = client.post(
+            "/transcribe",
+            files={"audio": ("empty.wav", b"", "audio/wav")},
+        )
+        assert resp.status_code == 400
+        assert "empty" in resp.json()["error"]["message"]
+
+    def test_speak_whitespace_only_returns_400(self):
+        resp = client.post("/speak", json={"message": "   "})
+        assert resp.status_code == 400
+        assert "empty" in resp.json()["error"]["message"]
+
