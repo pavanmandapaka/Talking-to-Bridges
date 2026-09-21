@@ -22,4 +22,5 @@ sounddevice
 soundfile
 edge-tts
 elevenlabs
+pygame
 python-dotenv
