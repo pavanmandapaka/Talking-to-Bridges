@@ -8,7 +8,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import httpx
+import pandas as pd
 from rag.document_loader import load_document
+from rag.csv_processor import get_csv_summary, EmptyCSVError, CorruptedCSVError
 import streamlit as st
 
 st.set_page_config(page_title="Talking to Bridges", layout="wide")
@@ -42,7 +44,7 @@ with st.sidebar:
 
     st.header("Document Upload")
     uploaded_file = st.file_uploader(
-        "Upload a PDF, DOCX, or TXT file", type=["pdf", "docx", "txt"]
+        "Upload a PDF, DOCX, TXT, or CSV file", type=["pdf", "docx", "txt", "csv"]
     )
     if st.button("Upload Document") and uploaded_file is not None:
         with st.spinner("Processing and indexing document..."):
@@ -60,29 +62,57 @@ with st.sidebar:
                     data = response.json()
                     st.session_state.messages = []
 
-                    # Extract local preview & page count
-                    try:
-                        pages = load_document(uploaded_file.name, file_bytes)
-                        page_count = len(pages)
-                        preview_chunks = []
-                        char_count = 0
-                        for page in pages:
-                            preview_chunks.append(f"**Page {page.page_number}**\n{page.text}")
-                            char_count += len(page.text)
-                            if char_count >= 3000:
-                                break
-                        preview_text = "\n\n---\n\n".join(preview_chunks)
-                    except Exception:
-                        page_count = 1
-                        preview_text = file_bytes[:3000].decode("utf-8", errors="replace")
+                    is_csv = uploaded_file.name.lower().endswith(".csv")
 
-                    st.session_state.uploaded_doc = {
-                        "filename": uploaded_file.name,
-                        "document_id": data.get("document_id"),
-                        "chunks_created": data.get("chunks_created"),
-                        "page_count": page_count,
-                        "preview_text": preview_text,
-                    }
+                    if is_csv:
+                        # For CSV: get a rich summary using the local csv_processor
+                        try:
+                            csv_summary = get_csv_summary(file_bytes, uploaded_file.name)
+                        except (EmptyCSVError, CorruptedCSVError) as e:
+                            csv_summary = None
+                            st.warning(f"Could not generate local CSV preview: {e}")
+
+                        st.session_state.uploaded_doc = {
+                            "filename": uploaded_file.name,
+                            "document_id": data.get("document_id"),
+                            "chunks_created": data.get("chunks_created"),
+                            "file_type": "csv",
+                            "rows": data.get("rows"),
+                            "columns": data.get("columns"),
+                            "column_names": data.get("column_names", []),
+                            "preview_df": csv_summary["preview_df"] if csv_summary else None,
+                            "page_count": None,
+                            "preview_text": None,
+                        }
+                    else:
+                        # PDF / DOCX / TXT: existing local preview logic
+                        try:
+                            pages = load_document(uploaded_file.name, file_bytes)
+                            page_count = len(pages)
+                            preview_chunks = []
+                            char_count = 0
+                            for page in pages:
+                                preview_chunks.append(f"**Page {page.page_number}**\n{page.text}")
+                                char_count += len(page.text)
+                                if char_count >= 3000:
+                                    break
+                            preview_text = "\n\n---\n\n".join(preview_chunks)
+                        except Exception:
+                            page_count = 1
+                            preview_text = file_bytes[:3000].decode("utf-8", errors="replace")
+
+                        st.session_state.uploaded_doc = {
+                            "filename": uploaded_file.name,
+                            "document_id": data.get("document_id"),
+                            "chunks_created": data.get("chunks_created"),
+                            "file_type": Path(uploaded_file.name).suffix.lstrip("."),
+                            "page_count": page_count,
+                            "preview_text": preview_text,
+                            "rows": None,
+                            "columns": None,
+                            "column_names": [],
+                            "preview_df": None,
+                        }
                     st.success("Document uploaded and indexed successfully!")
                 else:
                     error_data = response.json()
@@ -98,11 +128,28 @@ with st.sidebar:
         st.subheader("Active Document Details")
         st.write(f"**File:** `{doc['filename']}`")
         st.write(f"**Document ID:** `{doc['document_id']}`")
-        st.write(f"**Pages:** {doc['page_count']}")
+        st.write(f"**File Type:** `{doc.get('file_type', 'unknown').upper()}`")
         st.write(f"**Chunks Created:** {doc['chunks_created']}")
 
-        with st.expander("Extracted Text Preview", expanded=False):
-            st.markdown(doc["preview_text"])
+        if doc.get("file_type") == "csv":
+            # CSV-specific display
+            if doc.get("rows") is not None:
+                st.write(f"**Rows:** {doc['rows']}")
+            if doc.get("columns") is not None:
+                st.write(f"**Columns:** {doc['columns']}")
+            if doc.get("column_names"):
+                st.write(f"**Column Names:** {', '.join(doc['column_names'])}")
+
+            if doc.get("preview_df") is not None:
+                with st.expander("CSV Data Preview (first 10 rows)", expanded=True):
+                    st.dataframe(doc["preview_df"], use_container_width=True)
+        else:
+            # PDF / DOCX / TXT display
+            if doc.get("page_count") is not None:
+                st.write(f"**Pages:** {doc['page_count']}")
+            if doc.get("preview_text"):
+                with st.expander("Extracted Text Preview", expanded=False):
+                    st.markdown(doc["preview_text"])
 
 # Main chat interface
 for msg in st.session_state.messages:

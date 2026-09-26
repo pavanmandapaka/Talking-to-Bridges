@@ -18,7 +18,8 @@ from rag.document_loader import (
     UnsupportedFileTypeError,
 )
 from rag.embeddings import EmbeddingError, EmbeddingService
-from rag.ingestion import DOCUMENTS_DIR, ingest_document
+from rag.ingestion import DOCUMENTS_DIR, ingest_csv, ingest_document
+from rag.csv_processor import CorruptedCSVError, EmptyCSVError
 from rag.retrieval import RetrievedChunk, VectorRetriever
 from rag.vector_store import FAISSVectorStore, VectorStoreError
 from app.services.llm_service import (
@@ -58,6 +59,11 @@ class ChatResponse(BaseModel):
 class UploadResponse(BaseModel):
     document_id: str
     chunks_created: int
+    # Optional fields populated for CSV uploads; None for PDF/DOCX/TXT
+    file_type: str | None = None
+    rows: int | None = None
+    columns: int | None = None
+    column_names: list[str] | None = None
 
 
 class RetrieveRequest(BaseModel):
@@ -105,10 +111,10 @@ async def upload(file: Annotated[UploadFile, File(...)]):
         )
 
     suffix = Path(file.filename).suffix.lower()
-    if suffix not in {".pdf", ".docx", ".txt"}:
+    if suffix not in {".pdf", ".docx", ".txt", ".csv"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file format '{suffix}'. Supported formats are: .pdf, .docx, .txt",
+            detail=f"Unsupported file format '{suffix}'. Supported formats are: .pdf, .docx, .txt, .csv",
         )
 
     document_id = f"doc-{len(_uploaded_documents) + 1:04d}"
@@ -123,16 +129,32 @@ async def upload(file: Annotated[UploadFile, File(...)]):
         _uploaded_documents.clear()
         vector_store.clear()
 
-        # Ingest: load, clean, chunk, embed, and index in FAISS
-        ingest_result = ingest_document(
-            filename=file.filename,
-            content=content,
-            document_id=document_id,
-            embedding_service=embedding_service,
-            vector_store=vector_store,
-        )
+        if suffix == ".csv":
+            # Route to the dedicated CSV ingestion pipeline
+            ingest_result = ingest_csv(
+                filename=file.filename,
+                content=content,
+                document_id=document_id,
+                embedding_service=embedding_service,
+                vector_store=vector_store,
+            )
+        else:
+            # Existing text-document pipeline (PDF / DOCX / TXT)
+            ingest_result = ingest_document(
+                filename=file.filename,
+                content=content,
+                document_id=document_id,
+                embedding_service=embedding_service,
+                vector_store=vector_store,
+            )
     except (UnsupportedFileTypeError, EmptyDocumentError, DocumentExtractionError, DocumentHandlingError, ValueError, OSError) as error:
         logger.error(f"Document upload error for '{file.filename}': {error}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    except (EmptyCSVError, CorruptedCSVError) as error:
+        logger.error(f"CSV upload error for '{file.filename}': {error}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(error),
@@ -157,7 +179,14 @@ async def upload(file: Annotated[UploadFile, File(...)]):
     ]
     _uploaded_documents[document_id] = chunks
 
-    return UploadResponse(document_id=document_id, chunks_created=ingest_result.chunks_created)
+    return UploadResponse(
+        document_id=document_id,
+        chunks_created=ingest_result.chunks_created,
+        file_type=suffix.lstrip("."),
+        rows=ingest_result.rows,
+        columns=ingest_result.columns,
+        column_names=ingest_result.column_names if ingest_result.column_names else None,
+    )
 
 
 def _get_all_chunks() -> list[ChunkResponse]:
