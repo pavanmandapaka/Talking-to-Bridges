@@ -266,7 +266,7 @@
             formData.append("file", file);
 
             try {
-                const res = await fetch("http://127.0.0.1:8000/upload", { method: "POST", body: formData });
+                const res = await fetch("http://127.0.0.1:8001/upload", { method: "POST", body: formData });
                 const data = await res.json();
 
                 if (res.ok) {
@@ -411,7 +411,7 @@
             
             try {
                 // 1. Transcribe
-                const sttRes = await fetch("http://127.0.0.1:8000/transcribe", { method: "POST", body: formData });
+                const sttRes = await fetch("http://127.0.0.1:8001/transcribe", { method: "POST", body: formData });
                 const sttData = await sttRes.json();
                 const text = sttData.text.trim();
                 
@@ -429,7 +429,7 @@
                 
                 // 2. LLM Chat
                 statusEl.innerText = "Thinking...";
-                const chatRes = await fetch("http://127.0.0.1:8000/api/chat", {
+                const chatRes = await fetch("http://127.0.0.1:8001/api/chat", {
                     method: "POST", headers: {"Content-Type": "application/json"},
                     body: JSON.stringify({message: text})
                 });
@@ -443,7 +443,7 @@
                 
                 // 3. TTS Speak
                 statusEl.innerText = "Speaking... (Click orb to pause system)";
-                const ttsRes = await fetch("http://127.0.0.1:8000/speak", {
+                const ttsRes = await fetch("http://127.0.0.1:8001/speak", {
                     method: "POST", headers: {"Content-Type": "application/json"},
                     body: JSON.stringify({message: answer})
                 });
