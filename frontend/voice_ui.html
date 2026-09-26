@@ -232,6 +232,10 @@
     <div id="chat-log"></div>
 
     <script>
+        const BACKEND_URL = (window.location.protocol.startsWith("http") && window.location.origin) 
+            ? window.location.origin 
+            : "http://127.0.0.1:8000";
+
         const orb = document.getElementById('orb');
         const statusEl = document.getElementById('status');
         const chatLog = document.getElementById('chat-log');
@@ -266,7 +270,7 @@
             formData.append("file", file);
 
             try {
-                const res = await fetch("http://127.0.0.1:8001/upload", { method: "POST", body: formData });
+                const res = await fetch(`${BACKEND_URL}/upload`, { method: "POST", body: formData });
                 const data = await res.json();
 
                 if (res.ok) {
@@ -299,11 +303,11 @@
                     chatLog.innerHTML += `<div class="sys-msg">Indexed <b>${file.name}</b> (${data.chunks_created} chunks). You can now ask questions about it.</div>`;
                     chatLog.scrollTop = chatLog.scrollHeight;
                 } else {
-                    statusDiv.innerText = "Error: " + (data.detail || "Upload failed");
+                    statusDiv.innerText = "Error: " + (data.error?.message || data.detail || "Upload failed");
                     statusDiv.style.color = "#ff0055";
                 }
             } catch (err) {
-                statusDiv.innerText = "Failed to connect to backend.";
+                statusDiv.innerText = `Failed to connect to backend (${BACKEND_URL}).`;
                 statusDiv.style.color = "#ff0055";
             }
         }
@@ -411,9 +415,9 @@
             
             try {
                 // 1. Transcribe
-                const sttRes = await fetch("http://127.0.0.1:8001/transcribe", { method: "POST", body: formData });
+                const sttRes = await fetch(`${BACKEND_URL}/transcribe`, { method: "POST", body: formData });
                 const sttData = await sttRes.json();
-                const text = sttData.text.trim();
+                const text = sttData.text ? sttData.text.trim() : "";
                 
                 if (!text) { resetListening(); return; }
                 
@@ -429,12 +433,12 @@
                 
                 // 2. LLM Chat
                 statusEl.innerText = "Thinking...";
-                const chatRes = await fetch("http://127.0.0.1:8001/api/chat", {
+                const chatRes = await fetch(`${BACKEND_URL}/api/chat`, {
                     method: "POST", headers: {"Content-Type": "application/json"},
                     body: JSON.stringify({message: text})
                 });
                 const chatData = await chatRes.json();
-                const answer = chatData.answer;
+                const answer = chatData.answer || (chatData.error?.message ? "Error: " + chatData.error.message : "No response generated.");
                 
                 if (!isSystemActive) return;
                 
@@ -443,7 +447,7 @@
                 
                 // 3. TTS Speak
                 statusEl.innerText = "Speaking... (Click orb to pause system)";
-                const ttsRes = await fetch("http://127.0.0.1:8001/speak", {
+                const ttsRes = await fetch(`${BACKEND_URL}/speak`, {
                     method: "POST", headers: {"Content-Type": "application/json"},
                     body: JSON.stringify({message: answer})
                 });
@@ -451,13 +455,17 @@
                 
                 if (!isSystemActive) return;
                 
-                currentAudio = new Audio("data:" + ttsData.content_type + ";base64," + ttsData.audio_base64);
-                currentAudio.play();
-                
-                currentAudio.onended = () => { 
-                    currentAudio = null;
-                    if (isSystemActive) resetListening(); 
-                };
+                if (ttsData.audio_base64) {
+                    currentAudio = new Audio("data:" + ttsData.content_type + ";base64," + ttsData.audio_base64);
+                    currentAudio.play();
+                    
+                    currentAudio.onended = () => { 
+                        currentAudio = null;
+                        if (isSystemActive) resetListening(); 
+                    };
+                } else {
+                    if (isSystemActive) resetListening();
+                }
                 
             } catch (err) {
                 console.error(err);

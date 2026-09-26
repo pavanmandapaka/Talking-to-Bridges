@@ -122,15 +122,18 @@ def _format_value(value: Any) -> str:
     except (TypeError, ValueError):
         pass  # pd.isna raises for some types; treat as non-missing
 
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+
     if isinstance(value, float):
-        # Preserve full precision but strip unnecessary trailing .0
-        if value == int(value) and not (value != value):  # not NaN
-            # Only strip .0 for "round" floats that are actually integers
-            # but keep decimal precision for values like 32.5, 0.0045
+        if value == int(value) and not (value != value):
             int_val = int(value)
             if float(int_val) == value:
                 return str(int_val)
-        return repr(value)  # repr preserves full float precision
+        return f"{value:.6g}".rstrip("0").rstrip(".") if "." in f"{value:.6g}" else f"{value:.6g}"
 
     return str(value)
 
