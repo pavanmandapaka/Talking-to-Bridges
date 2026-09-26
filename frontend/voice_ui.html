@@ -5,39 +5,61 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Talking to Bridges - Voice Mode</title>
     <style>
+        :root {
+            --bg-main: #0e1117;
+            --bg-card: #1a1c23;
+            --border-color: #333340;
+            --accent-green: #00ff88;
+            --accent-blue: #00b4d8;
+            --accent-amber: #ffaa00;
+            --accent-red: #ff0055;
+            --text-main: #fafafa;
+            --text-muted: #888;
+        }
+
         body {
-            background-color: #0e1117;
-            color: #fafafa;
+            background-color: var(--bg-main);
+            color: var(--text-main);
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            height: 100vh;
+            min-height: 100vh;
             margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
         }
+
         h1 {
             font-weight: 300;
             letter-spacing: 2px;
             margin-bottom: 5px;
+            margin-top: 0;
         }
-        p { color: #888; margin-bottom: 40px; }
+
+        p.subtitle {
+            color: var(--text-muted);
+            margin-bottom: 25px;
+            letter-spacing: 1px;
+            font-size: 14px;
+        }
         
         .orb-container {
-            width: 200px;
-            height: 200px;
+            width: 180px;
+            height: 180px;
             position: relative;
             display: flex;
             align-items: center;
             justify-content: center;
-            margin-bottom: 40px;
+            margin-bottom: 20px;
         }
         
         .orb {
             width: 100px;
             height: 100px;
             border-radius: 50%;
-            background: linear-gradient(135deg, #00ff88 0%, #00b4d8 100%);
+            background: linear-gradient(135deg, var(--accent-green) 0%, var(--accent-blue) 100%);
             box-shadow: 0 0 30px rgba(0, 255, 136, 0.4);
             transition: all 0.2s ease-in-out;
             cursor: pointer;
@@ -45,7 +67,7 @@
         
         .orb.listening {
             animation: pulse 1.5s infinite alternate;
-            background: linear-gradient(135deg, #ff0055 0%, #ffaa00 100%);
+            background: linear-gradient(135deg, var(--accent-red) 0%, var(--accent-amber) 100%);
             box-shadow: 0 0 50px rgba(255, 0, 85, 0.6);
         }
         
@@ -70,56 +92,136 @@
             top: 20px;
             right: 20px;
             text-align: right;
+            max-width: 320px;
         }
         
+        .upload-btn-group {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
         .upload-btn {
-            background: #1a1c23;
+            background: var(--bg-card);
             color: #ccc;
-            border: 1px solid #333;
-            padding: 10px 15px;
-            border-radius: 5px;
+            border: 1px solid var(--border-color);
+            padding: 9px 14px;
+            border-radius: 6px;
             cursor: pointer;
             transition: 0.2s;
+            font-size: 13px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
         }
         
         .upload-btn:hover {
-            background: #333;
+            background: #282c37;
             color: #fff;
+            border-color: var(--accent-blue);
+        }
+
+        .upload-card {
+            display: none;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 10px;
+            text-align: left;
+            font-size: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
         }
         
         #upload-status {
             font-size: 12px;
             color: #aaa;
-            margin-top: 5px;
+            margin-top: 6px;
+        }
+
+        .csv-summary {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .csv-badge {
+            display: inline-block;
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--accent-green);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 10px;
+            margin-right: 4px;
+        }
+
+        .column-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-top: 6px;
+            max-height: 60px;
+            overflow-y: auto;
+        }
+
+        .column-tag {
+            background: #252a36;
+            color: #8ed0ff;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
         }
         
-        #status { font-size: 1.2rem; margin-bottom: 20px; height: 30px; font-weight: bold; }
+        #status {
+            font-size: 1.1rem;
+            margin-bottom: 15px;
+            height: 25px;
+            font-weight: bold;
+            color: #dedede;
+        }
+
         #chat-log {
-            width: 80%;
-            max-width: 600px;
-            height: 200px;
+            width: 90%;
+            max-width: 650px;
+            height: 220px;
             overflow-y: auto;
-            background: #1a1c23;
+            background: var(--bg-card);
             border-radius: 10px;
-            padding: 20px;
+            padding: 18px;
             box-sizing: border-box;
             font-size: 14px;
-            border: 1px solid #333;
+            border: 1px solid var(--border-color);
         }
-        .user-msg { color: #00ff88; margin-bottom: 10px; }
-        .ai-msg { color: #00b4d8; margin-bottom: 15px; border-bottom: 1px solid #333; padding-bottom: 10px; }
+
+        .user-msg { color: var(--accent-green); margin-bottom: 10px; line-height: 1.4; }
+        .ai-msg { color: var(--accent-blue); margin-bottom: 12px; border-bottom: 1px solid #282c37; padding-bottom: 8px; line-height: 1.4; }
+        .sys-msg { color: var(--accent-amber); margin-bottom: 8px; font-size: 12px; font-style: italic; }
     </style>
 </head>
 <body>
 
     <div class="upload-container">
-        <input type="file" id="file-upload" accept=".pdf,.txt,.docx" style="display:none;" onchange="uploadDocument()">
-        <button onclick="document.getElementById('file-upload').click()" class="upload-btn">📄 Upload Context Document</button>
+        <input type="file" id="file-upload" accept=".pdf,.txt,.docx,.csv" style="display:none;" onchange="uploadDocument()">
+        <div class="upload-btn-group">
+            <button onclick="document.getElementById('file-upload').click()" class="upload-btn">
+                📂 Upload Context (CSV / Docs)
+            </button>
+        </div>
         <div id="upload-status"></div>
+        <div id="upload-card" class="upload-card">
+            <div id="card-filename" style="font-weight:bold; margin-bottom:4px;"></div>
+            <div id="card-details"></div>
+            <div id="card-csv-details" class="csv-summary" style="display:none;">
+                <span class="csv-badge">CSV DATA</span>
+                <span id="csv-shape-info"></span>
+                <div class="column-tags" id="csv-columns-list"></div>
+            </div>
+        </div>
     </div>
 
     <h1>VOICE AGENT</h1>
-    <p>TALKING TO BRIDGES</p>
+    <p class="subtitle">TALKING TO BRIDGES</p>
 
     <div class="orb-container">
         <div id="orb" class="orb" onclick="startSystem()"></div>
@@ -146,20 +248,57 @@
         async function uploadDocument() {
             const fileInput = document.getElementById('file-upload');
             const statusDiv = document.getElementById('upload-status');
+            const uploadCard = document.getElementById('upload-card');
+            const cardFilename = document.getElementById('card-filename');
+            const cardDetails = document.getElementById('card-details');
+            const cardCsvDetails = document.getElementById('card-csv-details');
+            const csvShapeInfo = document.getElementById('csv-shape-info');
+            const csvColsList = document.getElementById('csv-columns-list');
+
             const file = fileInput.files[0];
             if (!file) return;
 
-            statusDiv.innerText = "Uploading to vector database...";
+            const isCsv = file.name.toLowerCase().endsWith('.csv');
+            statusDiv.innerText = isCsv ? "Parsing CSV & generating vector embeddings..." : "Uploading to vector database...";
+            statusDiv.style.color = "#aaa";
+
             const formData = new FormData();
             formData.append("file", file);
 
             try {
                 const res = await fetch("http://127.0.0.1:8000/upload", { method: "POST", body: formData });
+                const data = await res.json();
+
                 if (res.ok) {
-                    statusDiv.innerText = "Document processed & ready!";
+                    statusDiv.innerText = isCsv ? "CSV processed and indexed into FAISS!" : "Document processed & ready!";
                     statusDiv.style.color = "#00ff88";
+
+                    uploadCard.style.display = "block";
+                    cardFilename.innerText = file.name;
+                    cardDetails.innerText = `Chunks Created: ${data.chunks_created} (Doc ID: ${data.document_id})`;
+
+                    if (data.file_type === "csv" || isCsv) {
+                        cardCsvDetails.style.display = "block";
+                        const rows = data.rows !== undefined ? data.rows : "N/A";
+                        const cols = data.columns !== undefined ? data.columns : "N/A";
+                        csvShapeInfo.innerText = `${rows} rows × ${cols} columns`;
+
+                        csvColsList.innerHTML = "";
+                        if (data.column_names && Array.isArray(data.column_names)) {
+                            data.column_names.forEach(col => {
+                                const tag = document.createElement("span");
+                                tag.className = "column-tag";
+                                tag.innerText = col;
+                                csvColsList.appendChild(tag);
+                            });
+                        }
+                    } else {
+                        cardCsvDetails.style.display = "none";
+                    }
+
+                    chatLog.innerHTML += `<div class="sys-msg">Indexed <b>${file.name}</b> (${data.chunks_created} chunks). You can now ask questions about it.</div>`;
+                    chatLog.scrollTop = chatLog.scrollHeight;
                 } else {
-                    const data = await res.json();
                     statusDiv.innerText = "Error: " + (data.detail || "Upload failed");
                     statusDiv.style.color = "#ff0055";
                 }
@@ -186,7 +325,7 @@
             chatLog.scrollTop = chatLog.scrollHeight;
             statusEl.innerText = "System Stopped. Click orb to restart.";
             orb.className = "orb";
-            orb.style.background = ""; // Reset to CSS default or hardcode if needed
+            orb.style.background = "";
             orb.style.boxShadow = "none";
             isSystemActive = false;
             isSpeaking = false;
@@ -194,7 +333,6 @@
         }
 
         async function startSystem() {
-            // TOGGLE LOGIC: If system is running, clicking orb stops it entirely.
             if (isSystemActive) {
                 stopSystem("Agent Paused by User.");
                 return;
@@ -202,18 +340,16 @@
 
             isSystemActive = true;
             statusEl.innerText = "Connecting to microphone...";
-            orb.style.background = ""; // Reset from stop state
+            orb.style.background = "";
             orb.style.boxShadow = "";
             
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 
-                // Set up MediaRecorder
                 mediaRecorder = new MediaRecorder(localStream);
                 mediaRecorder.ondataavailable = e => { audioChunks.push(e.data); };
                 mediaRecorder.onstop = processAudio;
                 
-                // Set up Silence Detection (VAD)
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const analyser = audioContext.createAnalyser();
                 const microphone = audioContext.createMediaStreamSource(localStream);
@@ -239,7 +375,6 @@
                     for (let i = 0; i < array.length; i++) { values += (array[i]); }
                     const average = values / array.length;
                     
-                    // Volume threshold for speech
                     if (average > 15) {
                         clearTimeout(silenceTimer);
                         if (!isRecording) {
@@ -249,7 +384,6 @@
                             orb.style.transform = "scale(1.2)";
                         }
                         
-                        // Stop recording after 1.5 seconds of silence
                         silenceTimer = setTimeout(() => {
                             if (isRecording) {
                                 mediaRecorder.stop();
@@ -269,14 +403,14 @@
 
         async function processAudio() {
             if (!isSystemActive) return;
-            isSpeaking = true; // Pause listening
+            isSpeaking = true;
             
             const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
             const formData = new FormData();
             formData.append("audio", audioBlob, "mic.wav");
             
             try {
-                // 1. Transcribe (Faster-Whisper GPU)
+                // 1. Transcribe
                 const sttRes = await fetch("http://127.0.0.1:8000/transcribe", { method: "POST", body: formData });
                 const sttData = await sttRes.json();
                 const text = sttData.text.trim();
@@ -286,7 +420,7 @@
                 chatLog.innerHTML += `<div class="user-msg"><b>YOU:</b> ${text}</div>`;
                 chatLog.scrollTop = chatLog.scrollHeight;
                 
-                // SHUTDOWN COMMAND LOGIC
+                // Shutdown check
                 const cleanText = text.toLowerCase().replace(/[^a-z ]/g, "").trim();
                 if (cleanText === "stop" || cleanText === "goodbye" || cleanText === "quit" || cleanText === "exit") {
                     stopSystem("Voice Agent Stopped via Voice Command.");
@@ -302,7 +436,7 @@
                 const chatData = await chatRes.json();
                 const answer = chatData.answer;
                 
-                if (!isSystemActive) return; // Abort if user stopped during processing
+                if (!isSystemActive) return;
                 
                 chatLog.innerHTML += `<div class="ai-msg"><b>AI:</b> ${answer}</div>`;
                 chatLog.scrollTop = chatLog.scrollHeight;
@@ -317,7 +451,6 @@
                 
                 if (!isSystemActive) return;
                 
-                // Play Audio
                 currentAudio = new Audio("data:" + ttsData.content_type + ";base64," + ttsData.audio_base64);
                 currentAudio.play();
                 
