@@ -49,15 +49,9 @@ def load_pdf(content: bytes, filename: str) -> list[DocumentPage]:
             cleaned = clean_text(raw_text)
             if cleaned:
                 pages.append(DocumentPage(text=cleaned, source_file=filename, page_number=page_idx))
-    except Exception:
-        # Fallback for plain-text mock data passed in unit tests
-        try:
-            raw_text = content.decode("utf-8", errors="replace")
-            cleaned = clean_text(raw_text)
-            if cleaned:
-                pages.append(DocumentPage(text=cleaned, source_file=filename, page_number=1))
-        except Exception as e:
-            raise DocumentExtractionError(f"Failed to read PDF file '{filename}': {e}") from e
+    except Exception as e:
+        raise DocumentExtractionError(f"Failed to read PDF file \'{filename}\': {e}") from e
+
 
     if not pages:
         raise EmptyDocumentError(f"PDF document '{filename}' contains no readable text.")
@@ -82,14 +76,9 @@ def load_docx(content: bytes, filename: str) -> list[DocumentPage]:
                 row_cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
                 if row_cells:
                     parts.append(" | ".join(row_cells))
-    except Exception:
-        # Fallback for plain-text mock data
-        try:
-            raw_text = content.decode("utf-8", errors="replace")
-            if raw_text.strip():
-                parts.append(raw_text)
-        except Exception as e:
-            raise DocumentExtractionError(f"Failed to read DOCX file '{filename}': {e}") from e
+    except Exception as e:
+        raise DocumentExtractionError(f"Failed to read DOCX file \'{filename}\': {e}") from e
+
 
     combined_text = "\n\n".join(parts)
     cleaned = clean_text(combined_text)

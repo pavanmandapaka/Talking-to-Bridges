@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes import router as api_router, vector_store
@@ -36,12 +37,23 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(api_router)
+
+_VOICE_UI = Path(__file__).resolve().parent.parent / "frontend" / "voice_ui.html"
+
+
+@app.get("/ui", include_in_schema=False)
+@app.get("/ui/voice_ui.html", include_in_schema=False)
+async def voice_ui():
+    """Serve the hands-free voice page from the same origin as the API."""
+    if not _VOICE_UI.exists():
+        return JSONResponse(status_code=404, content={"error": {"message": "voice_ui.html not found", "type": "NotFound"}})
+    return FileResponse(_VOICE_UI)
 
 
 @app.exception_handler(StarletteHTTPException)

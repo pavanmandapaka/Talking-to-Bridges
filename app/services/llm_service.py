@@ -82,47 +82,54 @@ class GroqLLMService:
             logger.error(f"Groq model listing request failed: {error}")
             raise GroqServiceError("Failed to list Groq models")
 
-    async def generate(self, prompt: str) -> str:
+    async def generate(self, messages: list[dict[str, str]]) -> str:
         """Generate a response from the configured Groq model."""
+        import asyncio
+        import httpx
         if not self.api_key:
             raise GroqUnavailableError("Groq API key is not configured")
 
         payload = {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "stream": False,
         }
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self.headers,
-                    json=payload,
-                )
-                if response.status_code in (401, 403):
-                    raise GroqUnavailableError("Groq API key is invalid")
-                if response.status_code == 404:
-                    raise GroqModelNotFoundError(
-                        f"Model '{self.model}' was not found in the Groq API."
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        headers=self.headers,
+                        json=payload,
                     )
-                if response.status_code != 200:
-                    logger.error(
-                        f"Groq returned status {response.status_code}: {response.text}"
-                    )
-                    raise GroqServiceError(
-                        f"Groq API error status: {response.status_code}"
-                    )
+                    
+                    if response.status_code == 429:
+                        if attempt < max_retries - 1:
+                            backoff = 2 ** attempt
+                            logger.warning(f"Groq rate limit hit. Retrying in {backoff}s...")
+                            await asyncio.sleep(backoff)
+                            continue
+                        else:
+                            raise GroqServiceError("Groq rate limit exceeded (429)")
 
-                choices = response.json().get("choices", [])
-                if not choices or not choices[0].get("message", {}).get("content"):
-                    raise GroqServiceError("Groq returned an empty response")
-                return choices[0]["message"]["content"]
-        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
-            logger.error(f"Connection failure to Groq at {self.base_url}: {error}")
-            raise GroqUnavailableError("Groq API is unavailable")
-        except httpx.TimeoutException as error:
-            logger.error(f"Groq generation request timed out: {error}")
-            raise GroqServiceError("Groq request timed out")
-        except httpx.RequestError as error:
-            logger.error(f"Groq request failed: {error}")
-            raise GroqServiceError("Failed to communicate with Groq")
+                    if response.status_code in (401, 403):
+                        raise GroqUnavailableError("Groq API key is invalid")
+                    if response.status_code == 404:
+                        raise GroqModelNotFoundError(f"Model '{self.model}' was not found.")
+                    if response.status_code != 200:
+                        raise GroqServiceError(f"Groq API error status: {response.status_code}")
+
+                    choices = response.json().get("choices", [])
+                    if not choices or not choices[0].get("message", {}).get("content"):
+                        raise GroqServiceError("Groq returned an empty response")
+                    return choices[0]["message"]["content"]
+                    
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RequestError) as error:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                if isinstance(error, httpx.TimeoutException):
+                    raise GroqServiceError("Groq request timed out")
+                raise GroqUnavailableError("Groq API is unavailable")

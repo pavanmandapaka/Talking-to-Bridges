@@ -15,7 +15,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Talking to Bridges", layout="wide")
 
-API_BASE_URL = "http://127.0.0.1:8000"
+API_BASE_URL = "http://127.0.0.1:8001"
 
 st.title("Talking to Bridges")
 st.subheader("An LLM-Based Intelligent Interface for Structural Health Monitoring")
@@ -250,3 +250,4 @@ if user_query:
                 st.error(f"API Error: {err_msg}")
         except Exception as e:  # noqa: BLE001
             st.error(f"Failed to connect to backend API: {e}")
+

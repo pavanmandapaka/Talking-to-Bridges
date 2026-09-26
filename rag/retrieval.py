@@ -56,6 +56,7 @@ class VectorRetriever:
 
         results: list[RetrievedChunk] = []
         for chunk_dict, score in raw_results:
+            if score < 0.20: continue
             results.append(
                 RetrievedChunk(
                     text=chunk_dict.get("text", ""),

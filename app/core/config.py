@@ -6,12 +6,12 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-20b"
     APP_HOST: str = "127.0.0.1"
-    APP_PORT: int = 8000
+    APP_PORT: int = 8001
 
     # RAG & Embedding Configuration
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 150
+    CHUNK_SIZE: int = 500
+    CHUNK_OVERLAP: int = 50
     VECTOR_DB_PATH: str = "data/vector_db"
     DOCUMENTS_DIR: str = "data/documents"
     PROCESSED_DIR: str = "data/processed"

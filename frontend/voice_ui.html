@@ -113,7 +113,7 @@
 <body>
 
     <div class="upload-container">
-        <input type="file" id="file-upload" accept=".pdf,.txt,.docx" style="display:none;" onchange="uploadDocument()">
+        <input type="file" id="file-upload" accept=".pdf,.txt,.docx,.csv" style="display:none;" onchange="uploadDocument()">
         <button onclick="document.getElementById('file-upload').click()" class="upload-btn">📄 Upload Context Document</button>
         <div id="upload-status"></div>
     </div>
@@ -154,7 +154,7 @@
             formData.append("file", file);
 
             try {
-                const res = await fetch("http://127.0.0.1:8000/upload", { method: "POST", body: formData });
+                const res = await fetch("http://127.0.0.1:8001/upload", { method: "POST", body: formData });
                 if (res.ok) {
                     statusDiv.innerText = "Document processed & ready!";
                     statusDiv.style.color = "#00ff88";
@@ -277,7 +277,7 @@
             
             try {
                 // 1. Transcribe (Faster-Whisper GPU)
-                const sttRes = await fetch("http://127.0.0.1:8000/transcribe", { method: "POST", body: formData });
+                const sttRes = await fetch("http://127.0.0.1:8001/transcribe", { method: "POST", body: formData });
                 const sttData = await sttRes.json();
                 const text = sttData.text.trim();
                 
@@ -295,7 +295,7 @@
                 
                 // 2. LLM Chat
                 statusEl.innerText = "Thinking...";
-                const chatRes = await fetch("http://127.0.0.1:8000/api/chat", {
+                const chatRes = await fetch("http://127.0.0.1:8001/api/chat", {
                     method: "POST", headers: {"Content-Type": "application/json"},
                     body: JSON.stringify({message: text})
                 });
@@ -309,7 +309,7 @@
                 
                 // 3. TTS Speak
                 statusEl.innerText = "Speaking... (Click orb to pause system)";
-                const ttsRes = await fetch("http://127.0.0.1:8000/speak", {
+                const ttsRes = await fetch("http://127.0.0.1:8001/speak", {
                     method: "POST", headers: {"Content-Type": "application/json"},
                     body: JSON.stringify({message: answer})
                 });
@@ -342,3 +342,4 @@
     </script>
 </body>
 </html>
+

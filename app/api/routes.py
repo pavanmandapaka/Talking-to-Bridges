@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import re
+import uuid
 import wave
 from pathlib import Path
 from typing import Annotated
@@ -38,10 +39,15 @@ retriever = VectorRetriever(embedding_service=embedding_service, vector_store=ve
 _uploaded_documents: dict[str, list["ChunkResponse"]] = {}
 
 
+class Message(BaseModel):
+    role: str
+    content: str
+
 class ChatRequest(BaseModel):
     message: str = Field(
         ..., min_length=1, description="User query or prompt message"
     )
+    chat_history: list[Message] = Field(default_factory=list)
 
 
 class ChunkResponse(BaseModel):
@@ -103,7 +109,6 @@ async def health():
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload(file: Annotated[UploadFile, File(...)]):
-    """Extract, clean, chunk, embed, and store a document in the FAISS vector database."""
     if not file.filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -117,56 +122,53 @@ async def upload(file: Annotated[UploadFile, File(...)]):
             detail=f"Unsupported file format '{suffix}'. Supported formats are: .pdf, .docx, .txt, .csv",
         )
 
-    document_id = f"doc-{len(_uploaded_documents) + 1:04d}"
+    document_id = f"doc-{uuid.uuid4().hex[:8]}"
     try:
         content = await file.read()
-
-        # Save source file to disk under data/documents/
+        
+        if len(content) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large")
+            
         DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        file_path = DOCUMENTS_DIR / f"{document_id}_{file.filename}"
-        # Clear previous document vectors and session state so earlier documents
-        # do not contaminate queries for the newly uploaded document.
-        _uploaded_documents.clear()
-        vector_store.clear()
-
+        import os
+        safe_filename = os.path.basename(file.filename)
+        file_path = DOCUMENTS_DIR / f"{document_id}_{safe_filename}"
+        
+        temp_vector_store = FAISSVectorStore()
+        
         if suffix == ".csv":
-            # Route to the dedicated CSV ingestion pipeline
-            ingest_result = ingest_csv(
-                filename=file.filename,
-                content=content,
-                document_id=document_id,
-                embedding_service=embedding_service,
-                vector_store=vector_store,
+            import asyncio
+            ingest_result = await asyncio.to_thread(
+                ingest_csv,
+                file.filename,
+                content,
+                document_id,
+                embedding_service,
+                temp_vector_store,
             )
         else:
-            # Existing text-document pipeline (PDF / DOCX / TXT)
-            ingest_result = ingest_document(
-                filename=file.filename,
-                content=content,
-                document_id=document_id,
-                embedding_service=embedding_service,
-                vector_store=vector_store,
+            import asyncio
+            ingest_result = await asyncio.to_thread(
+                ingest_document,
+                file.filename,
+                content,
+                document_id,
+                embedding_service,
+                temp_vector_store,
             )
-    except (UnsupportedFileTypeError, EmptyDocumentError, DocumentExtractionError, DocumentHandlingError, ValueError, OSError) as error:
-        logger.error(f"Document upload error for '{file.filename}': {error}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(error),
-        ) from error
-    except (EmptyCSVError, CorruptedCSVError) as error:
-        logger.error(f"CSV upload error for '{file.filename}': {error}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(error),
-        ) from error
-    except (EmbeddingError, VectorStoreError) as error:
-        logger.error(f"RAG processing error for '{file.filename}': {error}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process and index document: {error}",
-        ) from error
+            
+        global vector_store
+        vector_store.index = temp_vector_store.index
+        vector_store.dimension = temp_vector_store.dimension
+        vector_store.metadata = temp_vector_store.metadata
 
-    # Keep active uploaded documents list
+    except (UnsupportedFileTypeError, EmptyDocumentError, DocumentExtractionError, DocumentHandlingError, ValueError, OSError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except (EmptyCSVError, CorruptedCSVError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except (EmbeddingError, VectorStoreError) as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
     _uploaded_documents.clear()
     chunks = [
         ChunkResponse(
@@ -183,11 +185,10 @@ async def upload(file: Annotated[UploadFile, File(...)]):
         document_id=document_id,
         chunks_created=ingest_result.chunks_created,
         file_type=suffix.lstrip("."),
-        rows=ingest_result.rows,
-        columns=ingest_result.columns,
-        column_names=ingest_result.column_names if ingest_result.column_names else None,
+        rows=ingest_result.rows if hasattr(ingest_result, 'rows') else None,
+        columns=ingest_result.columns if hasattr(ingest_result, 'columns') else None,
+        column_names=ingest_result.column_names if hasattr(ingest_result, 'column_names') else None,
     )
-
 
 def _get_all_chunks() -> list[ChunkResponse]:
     """Retrieve all available document chunks from active uploads or loaded vector store metadata."""
@@ -291,7 +292,8 @@ async def transcribe_audio(audio: Annotated[UploadFile, File(...)]):
             
         # Run Eswar's fast transcription
         try:
-            transcribed_text = run_stt(temp_path)
+            import asyncio
+            transcribed_text = await asyncio.to_thread(run_stt, temp_path)
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -301,8 +303,7 @@ async def transcribe_audio(audio: Annotated[UploadFile, File(...)]):
         raise
     except Exception as e:
         logger.error(f"Transcription error: {e}")
-        # Fallback to dummy if something breaks
-        return TranscribeResponse(text="This is dummy transcribed speech (fallback due to error).")
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 def _dummy_wav_base64() -> str:
@@ -338,82 +339,37 @@ async def speak(request: ChatRequest):
 @router.post("/chat", response_model=ChatResponse)
 @router.post("/api/chat", response_model=ChatResponse, include_in_schema=False)
 async def chat(request: ChatRequest):
-    """Processes user query, retrieves relevant document chunks, and generates an answer from Groq."""
-    logger.info("Received request on POST /api/chat")
     clean_message = request.message.strip()
     if not clean_message:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Message cannot be empty or whitespace only",
-        )
+        raise HTTPException(status_code=400, detail="Message empty")
 
     try:
-        # Retrieve context via semantic vector search or fallback
-        retrieved_chunks: list[RetrievalResult] = []
+        retrieved_chunks = []
         try:
             semantic_results = retriever.retrieve(clean_message, top_k=3)
             if semantic_results:
-                retrieved_chunks = [
-                    RetrievalResult(
-                        chunk=ChunkResponse(
-                            text=r.text,
-                            source_file=r.source_file,
-                            page_number=r.page_number,
-                            chunk_id=r.chunk_id,
-                        ),
-                        score=r.score,
-                    )
-                    for r in semantic_results
-                ]
-        except Exception as e:
-            logger.warning(f"Vector retrieval failed for chat query: {e}")
-
+                retrieved_chunks = [RetrievalResult(chunk=ChunkResponse(text=r.text, source_file=r.source_file, page_number=r.page_number, chunk_id=r.chunk_id), score=r.score) for r in semantic_results]
+        except Exception:
+            pass
+            
         if not retrieved_chunks:
             retrieved_chunks = _lexical_document_results(clean_message, limit=3)
 
         if retrieved_chunks:
-            context = "\n\n".join(
-                f"[Source: {result.chunk.source_file}, page {result.chunk.page_number}]\n"
-                f"{result.chunk.text}"
-                for result in retrieved_chunks
-            )
-            prompt = (
-                "You are a helpful assistant for the Talking to Bridges platform.\n"
-                "Answer the user's question accurately using the document context below when relevant.\n"
-                "If the user query is a greeting or general pleasantry, respond politely and invite questions about the bridge.\n"
-                "If the user asks for information not present in the context, state clearly that the document does not contain that information.\n"
-                "For a summary, cover the main points from all provided context.\n\n"
-                f"Document context:\n{context}\n\nUser question: {clean_message}"
-            )
+            context = "\n\n".join(f"[Source: {r.chunk.source_file}]\n{r.chunk.text}" for r in retrieved_chunks)
+            from rag.prompts import SYSTEM_PROMPT, USER_PROMPT
+            system_content = SYSTEM_PROMPT.format(context=context)
+            user_content = USER_PROMPT.format(query=clean_message)
         else:
-            prompt = clean_message
+            system_content = "You are a helpful assistant for the Talking to Bridges platform. The user has not provided any document context. If they ask about a document, inform them that none is uploaded."
+            user_content = clean_message
 
-        answer = await llm_service.generate(prompt)
-        return ChatResponse(
-            answer=answer,
-            sources=[result.chunk for result in retrieved_chunks],
-        )
-    except GroqUnavailableError:
-        logger.error("Chat endpoint error: Groq service is unavailable")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Groq service is unavailable",
-        )
-    except GroqModelNotFoundError as e:
-        logger.error(f"Chat endpoint error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
-        )
-    except GroqServiceError as e:
-        logger.error(f"Chat endpoint error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal service error communicating with LLM",
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Unhandled error in chat endpoint")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error",
-        )
+        messages = [{"role": "system", "content": system_content}]
+        for msg in request.chat_history[-5:]:
+            messages.append({"role": msg.role, "content": msg.content})
+        messages.append({"role": "user", "content": user_content})
+
+        answer = await llm_service.generate(messages)
+        return ChatResponse(answer=answer, sources=[r.chunk for r in retrieved_chunks])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

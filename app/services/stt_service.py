@@ -1,49 +1,66 @@
 import os
+import threading
+
 # Fix for OpenMP duplicate library error on Windows/Anaconda
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 from faster_whisper import WhisperModel
 
-# ---------------------------------------------------------
-# GLOBAL MODEL INITIALIZATION
-# We load the model outside the function so it only takes
-# time to load once when the app starts, making transcriptions 
-# instant when the user actually speaks.
-# ---------------------------------------------------------
-print("Loading Speech-to-Text Model (faster-whisper, base, GPU)...")
-try:
-    # Try loading on GPU
-    model = WhisperModel("base", device="cuda", compute_type="float16")
-except Exception as e:
-    print(f"GPU load failed ({e}). Falling back to CPU...")
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+_model = None
+_device = None
+_lock = threading.Lock()
+
+
+def _load(device: str):
+    """Load the Whisper model on the given device ("cuda" or "cpu")."""
+    global _model, _device
+    if device == "cuda":
+        _model = WhisperModel("base", device="cuda", compute_type="float16")
+    else:
+        _model = WhisperModel("base", device="cpu", compute_type="int8")
+    _device = device
+    return _model
+
+
+def get_model():
+    """Lazy-load the model on first use (GPU if possible, otherwise CPU)."""
+    if _model is None:
+        print("Loading Speech-to-Text Model (faster-whisper, base)...")
+        try:
+            _load("cuda")
+        except Exception as e:
+            print(f"GPU load failed ({e}). Falling back to CPU...")
+            _load("cpu")
+    return _model
+
+
+def _run(model, audio_file_path: str) -> str:
+    # NOTE: `segments` is a lazy generator - the real work (and any CUDA/cuBLAS/cuDNN
+    # error on Windows) happens while it is consumed, so it must be consumed in here.
+    segments, _info = model.transcribe(audio_file_path, beam_size=5, vad_filter=True)
+    return " ".join(segment.text.strip() for segment in segments).strip()
+
 
 def transcribe(audio_file_path):
-    """
-    Day 1 Agreement for /transcribe
-    What goes in: Audio (file path)
-    What comes out: The text that was spoken
-    """
+    """What goes in: audio file path. What comes out: the spoken text ("" if silence)."""
     if not os.path.exists(audio_file_path):
-        return "Error: Audio file not found."
-        
-    # Transcribe the audio
-    segments, info = model.transcribe(audio_file_path, beam_size=5)
-    
-    # Combine the segments into a single string
-    text = ""
-    for segment in segments:
-        text += segment.text + " "
-        
-    return text.strip()
+        raise FileNotFoundError(f"Audio file not found: {audio_file_path}")
+
+    with _lock:
+        model = get_model()
+        try:
+            return _run(model, audio_file_path)
+        except Exception as e:
+            if _device == "cuda":
+                print(f"GPU transcription failed ({e}). Retrying on CPU...")
+                return _run(_load("cpu"), audio_file_path)
+            raise
+
 
 # Quick test if you run this file directly
 if __name__ == "__main__":
-    # You can test this with the sample audio you created earlier
-    test_audio = "sample_test_audio.wav"
+    test_audio = "speech/sample_test_audio.wav"
     if os.path.exists(test_audio):
-        print(f"\nTesting transcription on: {test_audio}")
-        result = transcribe(test_audio)
-        print("Result:", result)
+        print("Result:", transcribe(test_audio))
     else:
-        print(f"\nCould not find {test_audio} to run a quick test.")
+        print(f"Could not find {test_audio}")

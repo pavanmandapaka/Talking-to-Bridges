@@ -160,6 +160,7 @@ class FAISSVectorStore:
     def clear(self) -> None:
         """Clear in-memory index and metadata."""
         self.index = None
+        self.dimension = None
         self.metadata = []
         if self.dimension is not None:
             self._init_index(self.dimension)

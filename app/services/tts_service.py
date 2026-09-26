@@ -21,17 +21,29 @@ def get_piper_voice():
     if _piper_voice is None:
         try:
             from piper.voice import PiperVoice
-            import urllib.request
-            # Downloads/Loads Piper on demand
+            import requests
+            import tempfile
+            import shutil
+            
             model_name = "en_US-lessac-high"
             base_url = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/high/{model_name}"
             model_path = os.path.join(os.path.dirname(__file__), f"{model_name}.onnx")
             config_path = f"{model_path}.json"
             
+            def download_file(url, out_path):
+                print(f"Downloading {out_path}...")
+                with requests.get(url, stream=True, timeout=30.0) as r:
+                    r.raise_for_status()
+                    fd, tmp = tempfile.mkstemp()
+                    os.close(fd)
+                    with open(tmp, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    shutil.move(tmp, out_path)
+            
             if not os.path.exists(model_path):
-                print(f"Downloading Piper Voice ({model_name})...")
-                urllib.request.urlretrieve(f"{base_url}.onnx", model_path)
-                urllib.request.urlretrieve(f"{base_url}.onnx.json", config_path)
+                download_file(f"{base_url}.onnx", model_path)
+                download_file(f"{base_url}.onnx.json", config_path)
             
             _piper_voice = PiperVoice.load(model_path)
         except Exception as e:
@@ -55,7 +67,7 @@ def _speak_elevenlabs(text: str) -> tuple[str, str]:
     }
     headers = {"Accept": "audio/mpeg", "xi-api-key": api_key}
     
-    response = requests.post(url, json=payload, headers=headers)
+    response = requests.post(url, json=payload, headers=headers, timeout=10.0)
     if response.status_code == 200:
         audio_b64 = base64.b64encode(response.content).decode("ascii")
         return audio_b64, "audio/mpeg"
