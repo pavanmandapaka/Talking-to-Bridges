@@ -1,0 +1,16 @@
+Bridge Inspection Report
+
+Bridge ID: TB-001
+Inspection Date: 15 August 2026
+
+The bridge consists of three spans.
+
+The east span contains a crack approximately 3.4 mm wide.
+
+Vibration measurements reached 4.72 mm/s during the inspection period.
+
+The measured temperature was 35 °C.
+
+No visible corrosion was observed on the main support beams.
+
+The deck condition was classified as satisfactory.
