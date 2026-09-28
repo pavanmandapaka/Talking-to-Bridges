@@ -7,7 +7,13 @@ import wave
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status, Form
+import pandas as pd
+import io
+import base64
+from app.services.visualization_service import analyze_and_plot
+from app.services.tts_service import generate_speech
+import asyncio
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -372,4 +378,45 @@ async def chat(request: ChatRequest):
         answer = await llm_service.generate(messages)
         return ChatResponse(answer=answer, sources=[r.chunk for r in retrieved_chunks])
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/analyze_csv")
+async def analyze_csv(
+    file: UploadFile = File(...),
+    time_col: str = Form(...),
+    val_col: str = Form(...)
+):
+    try:
+        content = await file.read()
+        df = pd.read_csv(io.BytesIO(content), comment="#")
+        
+        # Call the visualization service
+        fig, explanation = analyze_and_plot(df, time_col, val_col)
+        
+        # Calculate stats for speech
+        valid_data = df.dropna(subset=[val_col])
+        if not valid_data.empty:
+            max_val = valid_data[val_col].max()
+            min_val = valid_data[val_col].min()
+            avg_val = valid_data[val_col].mean()
+            spoken_text = (
+                f"Here is the chart for {val_col} over {time_col}. "
+                f"The maximum value is {max_val:.2f}, "
+                f"the minimum value is {min_val:.2f}, "
+                f"and the average value is {avg_val:.2f}."
+            )
+        else:
+            spoken_text = "I couldn't find any valid numerical data to analyze."
+            
+        # Generate TTS audio
+        audio_base64_str, content_type = await asyncio.to_thread(generate_speech, spoken_text)
+        
+        return {
+            "fig_json": fig.to_json(),
+            "explanation": explanation,
+            "audio_base64": audio_base64_str,
+            "content_type": content_type
+        }
+    except Exception as e:
+        logger.error(f"Analyze CSV error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
