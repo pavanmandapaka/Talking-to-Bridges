@@ -5,7 +5,7 @@ import re
 import uuid
 import wave
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status, Form
 import pandas as pd
@@ -351,6 +351,62 @@ async def chat(request: ChatRequest):
 
     try:
         retrieved_chunks = []
+        tool_analytical_result = None
+
+        # Check for analytical tool routing (summary stats, anomalies, predictions, chart)
+        from analysis.tools import registry, data_access
+        lower_msg = clean_message.lower()
+        
+        # Load active dataset if available
+        active_df = None
+        if _uploaded_documents:
+            doc_id = list(_uploaded_documents.keys())[0]
+            matching_files = list(DOCUMENTS_DIR.glob(f"{doc_id}_*"))
+            if matching_files:
+                try:
+                    active_df = data_access.load_dataset(matching_files[0])
+                except Exception:
+                    pass
+
+        # Match analytical intent if keywords match
+        if any(w in lower_msg for w in ["stat", "average", "mean", "min", "max", "summary"]) and "chart" not in lower_msg:
+            metric = "deflection"
+            if active_df is not None:
+                numeric_cols = list(active_df.select_dtypes(include=["number"]).columns)
+                for col in numeric_cols:
+                    if col.lower() in lower_msg:
+                        metric = col
+                        break
+                else:
+                    if numeric_cols:
+                        metric = numeric_cols[0]
+            tool_analytical_result = registry.execute("summary_statistics", {"metric": metric}, df=active_df)
+
+        elif any(w in lower_msg for w in ["anomaly", "anomalies", "outlier", "alert", "spike"]):
+            metric = "vibration"
+            if active_df is not None:
+                numeric_cols = list(active_df.select_dtypes(include=["number"]).columns)
+                for col in numeric_cols:
+                    if col.lower() in lower_msg:
+                        metric = col
+                        break
+                else:
+                    if numeric_cols:
+                        metric = numeric_cols[0]
+            tool_analytical_result = registry.execute("anomaly_detection", {"metric": metric, "threshold": 2.0}, df=active_df)
+
+        elif any(w in lower_msg for w in ["predict", "condition", "status", "forecast"]):
+            tool_analytical_result = registry.execute("model_result", {"sensor_id": "S01", "target_variable": "condition"}, df=active_df)
+
+        elif any(w in lower_msg for w in ["chart", "plot", "graph", "visualize"]):
+            y_col = "deflection"
+            if active_df is not None:
+                numeric_cols = list(active_df.select_dtypes(include=["number"]).columns)
+                if numeric_cols:
+                    y_col = numeric_cols[0]
+            tool_analytical_result = registry.execute("chart_data", {"x_col": "timestamp", "y_col": y_col}, df=active_df)
+
+        # Vector & Lexical RAG Retrieval
         try:
             semantic_results = retriever.retrieve(clean_message, top_k=3)
             if semantic_results:
@@ -361,13 +417,20 @@ async def chat(request: ChatRequest):
         if not retrieved_chunks:
             retrieved_chunks = _lexical_document_results(clean_message, limit=3)
 
+        context_blocks = []
         if retrieved_chunks:
-            context = "\n\n".join(f"[Source: {r.chunk.source_file}]\n{r.chunk.text}" for r in retrieved_chunks)
+            context_blocks.append("\n\n".join(f"[Source: {r.chunk.source_file}]\n{r.chunk.text}" for r in retrieved_chunks))
+        
+        if tool_analytical_result and tool_analytical_result.get("status") == "success":
+            context_blocks.append(f"[Analytical Tool Result - {tool_analytical_result['tool']}]\n{tool_analytical_result['data']}")
+
+        if context_blocks:
+            context = "\n\n".join(context_blocks)
             from rag.prompts import SYSTEM_PROMPT, USER_PROMPT
             system_content = SYSTEM_PROMPT.format(context=context)
             user_content = USER_PROMPT.format(query=clean_message)
         else:
-            system_content = "You are a helpful assistant for the Talking to Bridges platform. The user has not provided any document context. If they ask about a document, inform them that none is uploaded."
+            system_content = "You are a helpful assistant for the Talking to Bridges platform. The user has not provided any document context or analytical data. If they ask about a document or dataset, inform them politely that none is uploaded."
             user_content = clean_message
 
         messages = [{"role": "system", "content": system_content}]
@@ -380,6 +443,48 @@ async def chat(request: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class ToolExecuteRequest(BaseModel):
+    tool_name: str = Field(..., description="Name of the analytical tool to execute")
+    arguments: dict[str, Any] = Field(default_factory=dict, description="Structured arguments for the tool")
+    document_id: str | None = Field(default=None, description="Optional uploaded document_id to run tool against")
+
+
+class ToolExecuteResponse(BaseModel):
+    tool: str
+    status: str
+    data: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    message: str | None = None
+    error_type: str | None = None
+    details: dict[str, Any] | None = None
+
+
+@router.get("/api/tools")
+async def list_analytical_tools():
+    """List available analytical tools registered in the platform."""
+    from analysis.tools import registry
+    return {"tools": registry.list_tools()}
+
+
+@router.post("/api/tools/execute", response_model=ToolExecuteResponse)
+async def execute_analytical_tool(request: ToolExecuteRequest):
+    """Execute a registered analytical tool with structured arguments and dataset context."""
+    from analysis.tools import registry, data_access
+    
+    df = None
+    if request.document_id:
+        # Search for document file in DOCUMENTS_DIR matching document_id
+        matching_files = list(DOCUMENTS_DIR.glob(f"{request.document_id}_*"))
+        if matching_files:
+            try:
+                df = data_access.load_dataset(matching_files[0])
+            except Exception as e:
+                logger.warning(f"Could not load dataset for '{request.document_id}': {e}")
+                
+    result = registry.execute(request.tool_name, request.arguments, df=df)
+    return ToolExecuteResponse(**result)
+
+
 @router.post("/analyze_csv")
 async def analyze_csv(
     file: UploadFile = File(...),
@@ -390,15 +495,22 @@ async def analyze_csv(
         content = await file.read()
         df = pd.read_csv(io.BytesIO(content), comment="#")
         
-        # Call the visualization service
-        fig, explanation = analyze_and_plot(df, time_col, val_col)
+        from analysis.tools import registry
+        tool_result = registry.execute("chart_data", {"x_col": time_col, "y_col": val_col}, df=df)
         
+        if tool_result["status"] == "error":
+            raise HTTPException(status_code=400, detail=tool_result["message"])
+            
+        chart_data = tool_result["data"]
+        explanation = chart_data.get("explanation", "")
+        fig_json = chart_data.get("plot_json", "{}")
+
         # Calculate stats for speech
-        valid_data = df.dropna(subset=[val_col])
+        valid_data = df.dropna(subset=[val_col]) if val_col in df.columns else pd.DataFrame()
         if not valid_data.empty:
-            max_val = valid_data[val_col].max()
-            min_val = valid_data[val_col].min()
-            avg_val = valid_data[val_col].mean()
+            max_val = pd.to_numeric(valid_data[val_col], errors="coerce").max()
+            min_val = pd.to_numeric(valid_data[val_col], errors="coerce").min()
+            avg_val = pd.to_numeric(valid_data[val_col], errors="coerce").mean()
             spoken_text = (
                 f"Here is the chart for {val_col} over {time_col}. "
                 f"The maximum value is {max_val:.2f}, "
@@ -412,11 +524,14 @@ async def analyze_csv(
         audio_base64_str, content_type = await asyncio.to_thread(generate_speech, spoken_text)
         
         return {
-            "fig_json": fig.to_json(),
+            "fig_json": fig_json,
             "explanation": explanation,
             "audio_base64": audio_base64_str,
             "content_type": content_type
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Analyze CSV error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+

@@ -33,6 +33,7 @@ wheels/
 htmlcov/
 
 # Data & Vector Storage
+data/
 data/documents/*
 data/processed/*
 data/vector_db/*
