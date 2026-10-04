@@ -26,6 +26,7 @@ from analysis.sensor_pipeline import (
     load_clean_file,
     main,
     parse_path_metadata,
+    resolve_condition,
     run_pipeline,
 )
 
@@ -350,3 +351,34 @@ def test_wide_summary_with_empty_columns_is_still_skipped(tmp_path):
     with pytest.raises(Exception) as excinfo:
         clean_sensor_bytes(to_xlsx(wide), "Undamaged Data of 2 cantilever/Processed Data.xlsx", "Undamaged")
     assert type(excinfo.value).__name__ == "SkippedFileError"
+
+# ---- condition labels: folder name > ZIP name > layout ---------------------
+
+def test_resolve_condition_priority():
+    assert resolve_condition(None, "Undamaged Data of 2 cantilever/2nd/x.xlsx", "cantilevers.zip") == "Undamaged"
+    assert resolve_condition(None, "1mm/M1/x.xlsx", "undamaged_set.zip") == "Undamaged"
+    assert resolve_condition(None, "Damaged Beams/1mm/x.xlsx", "whatever.zip") == "Damaged"
+    assert resolve_condition("Damaged", "Undamaged Data/x.xlsx", "undamaged.zip") == "Damaged"  # explicit wins
+    assert resolve_condition(None, "1mm/M1/x.xlsx", "1mm.zip") is None                          # layout decides later
+
+
+def test_undamaged_folder_is_labelled_undamaged_even_when_zip_name_says_nothing(tmp_path):
+    """Regression for the manifest bug: 2nd-cantilever files written in the 7-column
+    layout were labelled 'Damaged' when the ZIP name did not contain 'undamaged'."""
+    zip_path = make_zip(tmp_path / "cantilevers.zip", {
+        "Undamaged Data of 2 cantilever/1st/Displacement/UD-1 cm.xlsx": to_xlsx(undamaged_df(5)),
+        "Undamaged Data of 2 cantilever/2nd/Displacement/UD-1 cm.xlsx": to_xlsx(damaged_df(5)),  # 7-column layout
+    })
+    manifest = run_pipeline([zip_path], tmp_path / "out").set_index("source_file")
+    first = manifest.loc["Undamaged Data of 2 cantilever/1st/Displacement/UD-1 cm.xlsx"]
+    second = manifest.loc["Undamaged Data of 2 cantilever/2nd/Displacement/UD-1 cm.xlsx"]
+    assert (first["condition"], first["layout"]) == ("Undamaged", "Undamaged")
+    assert (second["condition"], second["layout"]) == ("Undamaged", "Damaged")   # layout differs, label does not
+    clean = load_clean_file(tmp_path / "out" / second["output_file"])
+    assert clean["Condition"].eq("Undamaged").all()
+
+
+def test_beam_zip_without_condition_words_still_falls_back_to_layout(tmp_path):
+    zip_path = make_zip(tmp_path / "1mm.zip", {"1mm/M1/Displacement/1cm.xlsx": to_xlsx(damaged_df(5))})
+    manifest = run_pipeline([zip_path], tmp_path / "out")
+    assert manifest.loc[0, "condition"] == "Damaged"
