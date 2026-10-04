@@ -328,4 +328,4 @@ if user_query:
                 err_msg = error_data.get("error", {}).get("message", chat_resp.text)
                 st.error(f"API Error: {err_msg}")
         except Exception as e:  # noqa: BLE001
-            st.error(f"API Error: {e}")
+            st.error(f"Failed to connect to backend API: {e}")

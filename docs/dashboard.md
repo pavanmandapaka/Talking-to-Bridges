@@ -5,7 +5,7 @@ Interactive Streamlit dashboard for the cleaned bridge sensor data.
 ## Run
 ```bash
 pip install -r requirements.txt
-python eda_summary.py                  # creates data/processed/sensors/eda_summary_metrics.csv
+python analysis/eda_summary.py                  # creates data/processed/sensors/eda_summary_metrics.csv
 streamlit run frontend/app.py          # adjust path to where app.py lives
 ```
 

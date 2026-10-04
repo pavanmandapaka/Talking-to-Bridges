@@ -182,7 +182,7 @@ def _correlation(df: pd.DataFrame, sensors):
 def _eda(root: Path):
     path = root / EDA_CSV
     if not path.exists():
-        st.info(f"Run `python eda_summary.py` from the project root to create `{EDA_CSV}`.")
+        st.info(f"Run `python analysis/eda_summary.py` from the project root to create `{EDA_CSV}`.")
         return
     eda = _read_csv(str(path))
     for c in ("damage_level", "hit_group"):
