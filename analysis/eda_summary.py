@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
+
 import pandas as pd
-import numpy as np
 
 # Resolve the project root (the folder containing data/processed/sensors)
 # so the script works no matter where it is run from.

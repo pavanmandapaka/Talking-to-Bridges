@@ -1,3 +1,9 @@
+"""Sensor dashboard for Talking to Bridges (Week 5).
+
+Place this file next to app.py. Call render_dashboard(PROJECT_ROOT) from app.py.
+"""
+import logging
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -7,6 +13,7 @@ import streamlit as st
 SENSOR_DIR = "data/processed/sensors"
 MANIFEST = f"{SENSOR_DIR}/manifest.csv"
 EDA_CSV = f"{SENSOR_DIR}/eda_summary_metrics.csv"
+log = logging.getLogger(__name__)
 MAX_POINTS = 5000  # downsample long recordings so charts stay fast
 
 
@@ -22,7 +29,7 @@ def _read_csv(path_str: str) -> pd.DataFrame:
         try:
             return load_clean_file(path_str)
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("load_clean_file failed for %s; using plain read_csv", path_str)
     return pd.read_csv(path_str)
 
 
@@ -39,8 +46,6 @@ def _resolve(root: Path, rel: str):
     name = rel.replace("\\", "/").split("/")[-1]
     hit = next((root / SENSOR_DIR).rglob(name), None)
     return hit
-
-import re
 
 _TEST_TYPES = ("Displacement", "Multihit", "Randomhit", "Singlehit")
 META_COLS = ["Damage_Level", "Specimen", "Test_Type", "Hit_Group"]
@@ -64,13 +69,13 @@ def _file_metadata(root_str: str, rel_paths: tuple) -> pd.DataFrame:
                         rec[c] = str(head[c].iloc[0])
                 found = True
             except Exception:  # noqa: BLE001
-                pass
+                log.warning("Could not read metadata from %s; using the file name", rel)
         if not found:  # fallback: parse the path
-            m = re.search(r"(?<![0-9])(\d+\s?mm)", str(rel), re.I)
+            m = re.search(r"(?<![0-9])(\d+\s?mm)", str(rel), re.IGNORECASE)
             rec["Damage_Level"] = m.group(1).replace(" ", "").lower() if m else None
-            m = re.search("(" + "|".join(_TEST_TYPES) + ")", str(rel), re.I)
+            m = re.search("(" + "|".join(_TEST_TYPES) + ")", str(rel), re.IGNORECASE)
             rec["Test_Type"] = m.group(1).capitalize() if m else None
-            m = re.search(r"(?<![0-9])([234]\s?hit)", str(rel), re.I)
+            m = re.search(r"(?<![0-9])([234]\s?hit)", str(rel), re.IGNORECASE)
             rec["Hit_Group"] = m.group(1).replace(" ", "").lower() if m else None
         rows.append(rec)
     return pd.DataFrame(rows, columns=META_COLS)
