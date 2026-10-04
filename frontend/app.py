@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # NOW import modules from app or rag
 from app.services.visualization_service import analyze_and_plot
 import httpx
+import plotly.io as pio
 import pandas as pd
 from rag.document_loader import load_document
 from rag.csv_processor import get_csv_summary, EmptyCSVError, CorruptedCSVError
@@ -271,6 +272,13 @@ if user_query:
                 sources = data.get("sources", [])
                 st.markdown(answer)
 
+                # Render plot if backend generated one
+                fig = None
+                fig_json = data.get("fig")
+                if fig_json:
+                    fig = pio.from_json(fig_json)
+                    st.plotly_chart(fig, use_container_width=True)
+
                 if sources:
                     with st.expander("Sources & Citations", expanded=False):
                         for idx, src in enumerate(sources, start=1):
@@ -297,14 +305,13 @@ if user_query:
 
                 # Store to history
                 msg_data = {"role": "assistant", "content": answer, "sources": sources}
+                if fig:
+                    msg_data["fig"] = fig
                 if audio_bytes:
                     msg_data["audio"] = audio_bytes
                     msg_data["content_type"] = content_type
                 st.session_state.messages.append(msg_data)
             else:
-                error_data = chat_resp.json()
-                err_msg = error_data.get("error", {}).get("message", chat_resp.text)
-                st.error(f"API Error: {err_msg}")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Failed to connect to backend API: {e}")
-
+                st.error(f"Chat API error: {chat_resp.status_code} - {chat_resp.text}")
+        except Exception as e:
+            st.error(f"Error calling chat API: {e}")
