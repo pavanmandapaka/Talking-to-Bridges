@@ -157,6 +157,24 @@ def detect_condition(name: str) -> Optional[str]:
     return None
 
 
+def resolve_condition(
+    explicit: Optional[str], member_path: str, zip_name: str
+) -> Optional[str]:
+    """Decide "Damaged" / "Undamaged" for one workbook. Priority:
+    1. an explicit value given by the caller,
+    2. the folder names inside the ZIP ("Undamaged Data of 2 cantilever/2nd/..."),
+    3. the ZIP file name ("undamaged data of 2 cantilevers.zip"),
+    4. None: the caller then falls back to the detected layout.
+    The layout is deliberately the LAST resort: it describes how the file is
+    written, not what was measured.
+    """
+    return (
+        _normalise_condition(explicit)
+        or detect_condition(member_path)
+        or detect_condition(zip_name)
+    )
+
+
 def _normalise_condition(condition: Optional[str]) -> Optional[str]:
     if condition is None:
         return None
@@ -439,12 +457,11 @@ def clean_zip_member(
     anchor_date: str = DEFAULT_ANCHOR_DATE,
 ) -> Tuple[pd.DataFrame, FileReport]:
     """Clean one workbook inside a ZIP. Drop-in upgrade of Eswar's load_sensor_data:
-    the layout is detected automatically and the condition is read from the ZIP
-    name when not given.
+    the layout is detected automatically and the condition is read from the folder
+    names / ZIP name when not given (see resolve_condition).
     """
     zip_path = Path(zip_path)
-    if condition is None:
-        condition = detect_condition(zip_path.name)
+    condition = resolve_condition(condition, internal_file_path, zip_path.name)
     try:
         with zipfile.ZipFile(zip_path, "r") as archive:
             content = archive.read(internal_file_path)
@@ -482,7 +499,7 @@ def iter_clean_zip(
     (keeps memory low). On failure yields (None, report with status "error").
     """
     zip_path = Path(zip_path)
-    condition = _normalise_condition(condition) or detect_condition(zip_path.name)
+    explicit_condition = _normalise_condition(condition)
     try:
         archive = zipfile.ZipFile(zip_path, "r")
     except FileNotFoundError as exc:
@@ -501,6 +518,7 @@ def iter_clean_zip(
 
         for info in members:
             name = info.filename
+            condition = resolve_condition(explicit_condition, name, zip_path.name)
             try:
                 clean, report = clean_sensor_bytes(archive.read(name), name, condition, anchor_date)
                 yield clean, report
