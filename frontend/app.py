@@ -25,6 +25,93 @@ API_BASE_URL = "http://127.0.0.1:8001"
 st.title("Talking to Bridges")
 st.subheader("An LLM-Based Intelligent Interface for Structural Health Monitoring")
 
+
+# --- Clean Sensor Data Dashboard Page ---
+st.sidebar.header("Sensor Dashboard Settings")
+
+# Import pipeline helper function. If the pipeline package is not available in the
+# active runtime, fall back to a local CSV loader so the app still works.
+try:
+    from pipeline.load_clean_file import load_clean_file  # type: ignore[import-not-found]
+except ImportError:
+    def load_clean_file(path: str) -> pd.DataFrame:
+        resolved_path = PROJECT_ROOT / path
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"Clean data file not found: {path}")
+        return pd.read_csv(resolved_path)
+
+st.markdown("---")
+st.header("Sensor Data Dashboard")
+
+try:
+    # Load manifest index file
+    manifest_df = load_clean_file("data/processed/sensors/manifest.csv")
+
+    # Filter by condition (case-insensitive check)
+    cond_col = next((c for c in manifest_df.columns if c.lower() == "condition"), None)
+    if cond_col:
+        selected_cond = st.sidebar.selectbox("Condition", options=manifest_df[cond_col].dropna().unique())
+        manifest_df = manifest_df[manifest_df[cond_col] == selected_cond]
+
+    # Filter by specimen
+    specimen_col = next((c for c in manifest_df.columns if c.lower() in ["specimen", "layout"]), None)
+    if specimen_col:
+        selected_specimen = st.sidebar.selectbox("Specimen/Layout", options=manifest_df[specimen_col].dropna().unique())
+        manifest_df = manifest_df[manifest_df[specimen_col] == selected_specimen]
+
+    # Filter by damage level
+    dmg_col = next((c for c in manifest_df.columns if c.lower() in ["damage_level", "damage"]), None)
+    if dmg_col:
+        selected_dmg = st.sidebar.selectbox("Damage Level", options=["All"] + list(manifest_df[dmg_col].dropna().unique()))
+        if selected_dmg != "All":
+            manifest_df = manifest_df[manifest_df[dmg_col] == selected_dmg]
+
+    # Filter by test type
+    test_col = next((c for c in manifest_df.columns if c.lower() in ["test_type", "test"]), None)
+    if test_col:
+        selected_test = st.sidebar.selectbox("Test Type", options=["All"] + list(manifest_df[test_col].dropna().unique()))
+        if selected_test != "All":
+            manifest_df = manifest_df[manifest_df[test_col] == selected_test]
+            
+    # Identify file path column
+    file_col = next((c for c in ["output_file", "source_file", "file_path", "path"] if c in manifest_df.columns), None)
+
+    df = pd.DataFrame()
+    if file_col and not manifest_df.empty:
+        selected_file = st.sidebar.selectbox("Select Sensor File", options=manifest_df[file_col].unique())
+        selected_str = str(selected_file).lstrip("/\\")
+
+        # Candidate path checks relative to PROJECT_ROOT
+        possible_paths = [
+            selected_str,
+            f"data/processed/sensors/{selected_str}",
+            f"data/processed/sensors/{selected_str.split('/')[-1]}",
+        ]
+
+        for p in possible_paths:
+            if (PROJECT_ROOT / p).exists():
+                df = load_clean_file(p)
+                break
+
+    # Plot Sensor 1 to Sensor 5 vs Relative_Time_Sec
+    sensor_cols = [c for c in df.columns if c.lower().startswith("sensor_") or c.lower().startswith("sensor")]
+    time_col = next((c for c in df.columns if "time" in c.lower()), None)
+
+    if sensor_cols:
+        st.subheader("Sensor Time-Series Plot")
+        if "Relative_Time_Sec" in df.columns:
+            chart_data = df.set_index("Relative_Time_Sec")[sensor_cols]
+            st.line_chart(chart_data)
+        else:
+            st.line_chart(df[sensor_cols])
+    else:
+        st.warning("Sensor_1 to Sensor_5 or Relative_Time_Sec columns not found in selected file.")
+
+except Exception as e:  # noqa: BLE001
+    st.info(f"Dashboard sensor viewer offline or file not found: {e}")
+
+st.markdown("---")
+
 # Initialize session state for chat history and document details
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -297,8 +384,9 @@ if user_query:
                 audio_bytes = None
                 content_type = "audio/wav"
                 if speak_resp.status_code == 200:
-                    audio_base64 = speak_resp.json().get("audio_base64")
-                    content_type = speak_resp.json().get("content_type", "audio/wav")
+                    speak_data = speak_resp.json()
+                    audio_base64 = speak_data.get("audio_base64")
+                    content_type = speak_data.get("content_type", "audio/wav")
                     if audio_base64:
                         audio_bytes = base64.b64decode(audio_base64)
                         st.audio(audio_bytes, format=content_type)
@@ -312,6 +400,8 @@ if user_query:
                     msg_data["content_type"] = content_type
                 st.session_state.messages.append(msg_data)
             else:
-                st.error(f"Chat API error: {chat_resp.status_code} - {chat_resp.text}")
-        except Exception as e:
-            st.error(f"Error calling chat API: {e}")
+                error_data = chat_resp.json()
+                err_msg = error_data.get("error", {}).get("message", chat_resp.text)
+                st.error(f"API Error: {err_msg}")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"API Error: {e}")

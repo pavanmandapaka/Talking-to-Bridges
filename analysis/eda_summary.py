@@ -25,11 +25,19 @@ def generate_eda_summary():
         full_path = os.path.join("data/processed/sensors", str(out_rel_path))
         if os.path.exists(full_path):
             df = pd.read_csv(full_path)
+
+            damage_val = df['Damage_Level'].iloc[0] if 'Damage_Level' in df.columns else 'N/A'
+            specimen_val = df['Specimen'].iloc[0] if 'Specimen' in df.columns else 'N/A'
+            test_type_val = df['Test_Type'].iloc[0] if 'Test_Type' in df.columns else 'N/A'
+            hit_group_val = df['Hit_Group'].iloc[0] if 'Hit_Group' in df.columns else 'N/A'
+
             stats = {
                 'source_file': row.get('source_file'),
                 'condition': row.get('condition', 'Unknown'),
-                'damage_level': row.get('damage_level', 'N/A'),
-                'specimen': row.get('specimen', 'N/A'),
+                'damage_level': damage_val,
+                'specimen': specimen_val,
+                'test_type': test_type_val,
+                'hit_group': hit_group_val,
                 'row_count': len(df)
             }
             
