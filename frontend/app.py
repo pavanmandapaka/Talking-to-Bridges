@@ -27,89 +27,13 @@ st.subheader("An LLM-Based Intelligent Interface for Structural Health Monitorin
 
 
 # --- Clean Sensor Data Dashboard Page ---
-st.sidebar.header("Sensor Dashboard Settings")
-
-# Import pipeline helper function. If the pipeline package is not available in the
-# active runtime, fall back to a local CSV loader so the app still works.
-try:
-    from pipeline.load_clean_file import load_clean_file  # type: ignore[import-not-found]
-except ImportError:
-    def load_clean_file(path: str) -> pd.DataFrame:
-        resolved_path = PROJECT_ROOT / path
-        if not resolved_path.exists():
-            raise FileNotFoundError(f"Clean data file not found: {path}")
-        return pd.read_csv(resolved_path)
+from dashboard import render_dashboard
 
 st.markdown("---")
-st.header("Sensor Data Dashboard")
-
 try:
-    # Load manifest index file
-    manifest_df = load_clean_file("data/processed/sensors/manifest.csv")
-
-    # Filter by condition (case-insensitive check)
-    cond_col = next((c for c in manifest_df.columns if c.lower() == "condition"), None)
-    if cond_col:
-        selected_cond = st.sidebar.selectbox("Condition", options=manifest_df[cond_col].dropna().unique())
-        manifest_df = manifest_df[manifest_df[cond_col] == selected_cond]
-
-    # Filter by specimen
-    specimen_col = next((c for c in manifest_df.columns if c.lower() in ["specimen", "layout"]), None)
-    if specimen_col:
-        selected_specimen = st.sidebar.selectbox("Specimen/Layout", options=manifest_df[specimen_col].dropna().unique())
-        manifest_df = manifest_df[manifest_df[specimen_col] == selected_specimen]
-
-    # Filter by damage level
-    dmg_col = next((c for c in manifest_df.columns if c.lower() in ["damage_level", "damage"]), None)
-    if dmg_col:
-        selected_dmg = st.sidebar.selectbox("Damage Level", options=["All"] + list(manifest_df[dmg_col].dropna().unique()))
-        if selected_dmg != "All":
-            manifest_df = manifest_df[manifest_df[dmg_col] == selected_dmg]
-
-    # Filter by test type
-    test_col = next((c for c in manifest_df.columns if c.lower() in ["test_type", "test"]), None)
-    if test_col:
-        selected_test = st.sidebar.selectbox("Test Type", options=["All"] + list(manifest_df[test_col].dropna().unique()))
-        if selected_test != "All":
-            manifest_df = manifest_df[manifest_df[test_col] == selected_test]
-            
-    # Identify file path column
-    file_col = next((c for c in ["output_file", "source_file", "file_path", "path"] if c in manifest_df.columns), None)
-
-    df = pd.DataFrame()
-    if file_col and not manifest_df.empty:
-        selected_file = st.sidebar.selectbox("Select Sensor File", options=manifest_df[file_col].unique())
-        selected_str = str(selected_file).lstrip("/\\")
-
-        # Candidate path checks relative to PROJECT_ROOT
-        possible_paths = [
-            selected_str,
-            f"data/processed/sensors/{selected_str}",
-            f"data/processed/sensors/{selected_str.split('/')[-1]}",
-        ]
-
-        for p in possible_paths:
-            if (PROJECT_ROOT / p).exists():
-                df = load_clean_file(p)
-                break
-
-    # Plot Sensor 1 to Sensor 5 vs Relative_Time_Sec
-    sensor_cols = [c for c in df.columns if c.lower().startswith("sensor_") or c.lower().startswith("sensor")]
-    time_col = next((c for c in df.columns if "time" in c.lower()), None)
-
-    if sensor_cols:
-        st.subheader("Sensor Time-Series Plot")
-        if "Relative_Time_Sec" in df.columns:
-            chart_data = df.set_index("Relative_Time_Sec")[sensor_cols]
-            st.line_chart(chart_data)
-        else:
-            st.line_chart(df[sensor_cols])
-    else:
-        st.warning("Sensor_1 to Sensor_5 or Relative_Time_Sec columns not found in selected file.")
-
+    render_dashboard(PROJECT_ROOT)
 except Exception as e:  # noqa: BLE001
-    st.info(f"Dashboard sensor viewer offline or file not found: {e}")
-
+    st.error(f"Dashboard error: {e}")
 st.markdown("---")
 
 # Initialize session state for chat history and document details
