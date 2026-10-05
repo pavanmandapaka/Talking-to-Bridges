@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # NOW import modules from app or rag
 from app.services.visualization_service import analyze_and_plot
 import httpx
+import plotly.io as pio
 import pandas as pd
 from rag.document_loader import load_document
 from rag.csv_processor import get_csv_summary, EmptyCSVError, CorruptedCSVError
@@ -23,6 +24,17 @@ API_BASE_URL = "http://127.0.0.1:8001"
 
 st.title("Talking to Bridges")
 st.subheader("An LLM-Based Intelligent Interface for Structural Health Monitoring")
+
+
+# --- Clean Sensor Data Dashboard Page ---
+from dashboard import render_dashboard
+
+st.markdown("---")
+try:
+    render_dashboard(PROJECT_ROOT)
+except Exception as e:  # noqa: BLE001
+    st.error(f"Dashboard error: {e}")
+st.markdown("---")
 
 # Initialize session state for chat history and document details
 if "messages" not in st.session_state:
@@ -271,6 +283,13 @@ if user_query:
                 sources = data.get("sources", [])
                 st.markdown(answer)
 
+                # Render plot if backend generated one
+                fig = None
+                fig_json = data.get("fig")
+                if fig_json:
+                    fig = pio.from_json(fig_json)
+                    st.plotly_chart(fig, use_container_width=True)
+
                 if sources:
                     with st.expander("Sources & Citations", expanded=False):
                         for idx, src in enumerate(sources, start=1):
@@ -289,14 +308,17 @@ if user_query:
                 audio_bytes = None
                 content_type = "audio/wav"
                 if speak_resp.status_code == 200:
-                    audio_base64 = speak_resp.json().get("audio_base64")
-                    content_type = speak_resp.json().get("content_type", "audio/wav")
+                    speak_data = speak_resp.json()
+                    audio_base64 = speak_data.get("audio_base64")
+                    content_type = speak_data.get("content_type", "audio/wav")
                     if audio_base64:
                         audio_bytes = base64.b64decode(audio_base64)
                         st.audio(audio_bytes, format=content_type)
 
                 # Store to history
                 msg_data = {"role": "assistant", "content": answer, "sources": sources}
+                if fig:
+                    msg_data["fig"] = fig
                 if audio_bytes:
                     msg_data["audio"] = audio_bytes
                     msg_data["content_type"] = content_type
@@ -307,4 +329,3 @@ if user_query:
                 st.error(f"API Error: {err_msg}")
         except Exception as e:  # noqa: BLE001
             st.error(f"Failed to connect to backend API: {e}")
-
