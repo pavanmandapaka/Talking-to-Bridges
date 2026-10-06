@@ -86,6 +86,11 @@ class SummaryStatisticsOutput(BaseModel):
     mean: float
     median: float
     std: float
+    variance: Optional[float] = None
+    skewness: Optional[float] = None
+    kurtosis: Optional[float] = None
+    q25: Optional[float] = None
+    q75: Optional[float] = None
     rms: Optional[float] = None   # Root-mean-square (from professor dataset)
     p2p: Optional[float] = None   # Peak-to-peak range (from professor dataset)
 

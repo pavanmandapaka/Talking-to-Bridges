@@ -460,17 +460,28 @@ def handle_summary_statistics(
 
         if not series.empty:
             arr = series.to_numpy()
-            rms_val = float(np.sqrt(np.mean(arr ** 2)))
-            p2p_val = float(arr.max() - arr.min())
+            arr_clean = arr[~np.isnan(arr)]
+            if len(arr_clean) == 0:
+                raise ToolExecutionError(f"No valid numeric data in {metric}")
+            
+            rms_val = float(np.sqrt(np.mean(arr_clean ** 2)))
+            p2p_val = float(arr_clean.max() - arr_clean.min())
+            
+            import scipy.stats as stats
             return {
                 "sensor_id": sensor_id,
                 "metric": metric,
                 "count": int(series.count()),
-                "min": round(float(arr.min()), 6),
-                "max": round(float(arr.max()), 6),
-                "mean": round(float(arr.mean()), 6),
-                "median": round(float(float(np.median(arr))), 6),
-                "std": round(float(arr.std(ddof=1)) if len(arr) > 1 else 0.0, 6),
+                "min": round(float(arr_clean.min()), 6),
+                "max": round(float(arr_clean.max()), 6),
+                "mean": round(float(arr_clean.mean()), 6),
+                "median": round(float(float(np.median(arr_clean))), 6),
+                "std": round(float(arr_clean.std(ddof=1)) if len(arr_clean) > 1 else 0.0, 6),
+                "variance": round(float(np.var(arr_clean, ddof=1)) if len(arr_clean) > 1 else 0.0, 6),
+                "skewness": round(float(stats.skew(arr_clean)) if len(arr_clean) > 2 else 0.0, 6),
+                "kurtosis": round(float(stats.kurtosis(arr_clean)) if len(arr_clean) > 3 else 0.0, 6),
+                "q25": round(float(np.percentile(arr_clean, 25)), 6),
+                "q75": round(float(np.percentile(arr_clean, 75)), 6),
                 "rms": round(rms_val, 6),
                 "p2p": round(p2p_val, 6),
             }
@@ -485,6 +496,11 @@ def handle_summary_statistics(
         "mean": 2.54,
         "median": 2.50,
         "std": 0.65,
+        "variance": 0.42,
+        "skewness": 0.1,
+        "kurtosis": -0.2,
+        "q25": 2.1,
+        "q75": 3.0,
         "rms": 2.62,
         "p2p": 2.10,
         "_note": "Placeholder result: upload a dataset for real statistics.",
