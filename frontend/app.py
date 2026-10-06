@@ -169,7 +169,7 @@ with st.sidebar:
                     st.markdown(doc["preview_text"])
 
 # Main chat interface
-for msg in st.session_state.messages:
+for msg_idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if "sources" in msg and msg["sources"]:
@@ -182,7 +182,7 @@ for msg in st.session_state.messages:
                         st.caption(src.get("text"))
 
         if "fig" in msg:
-            st.plotly_chart(msg["fig"], use_container_width=True)
+            st.plotly_chart(msg["fig"], use_container_width=True, key=f"chat_fig_{msg_idx}")
         if "audio" in msg:
             st.audio(msg["audio"], format=msg.get("content_type", "audio/wav"))
 
@@ -288,7 +288,11 @@ if user_query:
                 fig_json = data.get("fig")
                 if fig_json:
                     fig = pio.from_json(fig_json)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True,
+                        key=f"chat_fig_new_{len(st.session_state.messages)}",
+                    )
 
                 if sources:
                     with st.expander("Sources & Citations", expanded=False):
