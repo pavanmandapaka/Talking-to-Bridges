@@ -27,4 +27,5 @@ elevenlabs
 pygame
 python-dotenv
 plotly
-gTTS>=2.5.0scipy>=1.10.0
+gTTS>=2.5.0
+scipy>=1.10.0

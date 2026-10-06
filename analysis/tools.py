@@ -7,7 +7,7 @@ Provides:
 - ToolRegistry: register, lookup, validate, and execute tools.
 - Six analytical tool handlers grounded in the actual professor dataset schema:
     1. summary_statistics  (Eswar's statistics interface)
-    2. anomaly_detection   (Kolla's anomaly interface - z-score placeholder)
+    2. anomaly_detection   (Kolla's robust anomaly pipeline: analysis/anomaly_pipeline.py)
     3. trend_analysis      (linear trend over time / relative time)
     4. correlation_analysis (Pearson correlations between sensor columns)
     5. model_result        (Krishna's ML inference placeholder)
@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import numpy as np
 import pandas as pd
 
+from analysis.anomaly_pipeline import AnomalyInputError, detect_anomalies
 from app.core.config import settings
 
 logger = logging.getLogger("ttb.analysis.tools")
@@ -462,7 +463,7 @@ def handle_summary_statistics(
             arr = series.to_numpy()
             arr_clean = arr[~np.isnan(arr)]
             if len(arr_clean) == 0:
-                raise ToolExecutionError("DATA_ERROR", f"No valid numeric data in {metric}")
+                raise ToolExecutionError(f"No valid numeric data in {metric}")
             
             rms_val = float(np.sqrt(np.mean(arr_clean ** 2)))
             p2p_val = float(arr_clean.max() - arr_clean.min())
@@ -515,60 +516,32 @@ def handle_anomaly_detection(
     arguments: Dict[str, Any],
     df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-    """Detect anomalous readings using z-score thresholding.
+    """Detect anomalous readings with Kolla's robust anomaly pipeline.
 
-    This is the interface placeholder for Kolla's ML-based anomaly detector.
-    Replace the handler in the registry with Kolla's implementation while
-    keeping this input/output schema intact.
+    Delegates to analysis.anomaly_pipeline.detect_anomalies (robust z-score on
+    median/MAD, event grouping).  The input/output schema is unchanged; a few
+    extra keys (method, max_abs_z, baseline, event_count, events) are added.
+    When no dataset is available a deterministic placeholder is returned.
     """
     metric = arguments["metric"]
     sensor_id = arguments.get("sensor_id")
-    threshold = float(arguments.get("threshold", 2.0))
+    raw_threshold = arguments.get("threshold")
 
-    if df is not None and metric in df.columns:
+    if df is not None:
         try:
-            # Apply sensor_id filter if requested
-            sub_df = df
-            if sensor_id and "sensor_id" in df.columns:
-                sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)]
+            return detect_anomalies(
+                df, metric, sensor_id=sensor_id, threshold=raw_threshold
+            )
+        except AnomalyInputError as exc:
+            raise ToolExecutionError(
+                error_type=exc.error_type,
+                message=exc.message,
+                details=exc.details,
+            )
 
-            series = pd.to_numeric(sub_df[metric], errors="coerce").dropna()
-            if not series.empty:
-                mean_val = float(series.mean())
-                std_val = float(series.std()) if len(series) > 1 else 1.0
-                if std_val == 0.0:
-                    std_val = 1.0
-                z_scores = (series - mean_val) / std_val
-                mask = z_scores.abs() > threshold
-                anomalous_indices = [int(i) for i in series[mask].index.tolist()]
+    threshold = 2.0 if raw_threshold is None else float(raw_threshold)
 
-                # Extract timestamps if available
-                ts_col = _resolve_time_column(sub_df, None)
-                if ts_col != "index" and ts_col in sub_df.columns:
-                    anomalous_timestamps = [
-                        str(sub_df[ts_col].iloc[i]) if i < len(sub_df) else ""
-                        for i in anomalous_indices
-                    ]
-                else:
-                    anomalous_timestamps = [str(i) for i in anomalous_indices]
-
-                total = int(series.count())
-                anom_count = int(mask.sum())
-                return {
-                    "sensor_id": sensor_id,
-                    "metric": metric,
-                    "threshold_z": threshold,
-                    "total_rows_checked": total,
-                    "anomaly_count": anom_count,
-                    "anomaly_fraction": round(anom_count / total, 4) if total else 0.0,
-                    "anomalous_indices": anomalous_indices[:50],  # cap for JSON safety
-                    "anomalous_timestamps": anomalous_timestamps[:50],
-                    "status_flag": "Alert" if anom_count > 0 else "Normal",
-                }
-        except Exception as exc:
-            logger.warning("Anomaly detection computation failed: %s", exc)
-
-    # Deterministic placeholder
+    # Deterministic placeholder (no dataset uploaded)
     return {
         "sensor_id": sensor_id,
         "metric": metric,
@@ -896,9 +869,9 @@ registry.register(ToolDefinition(
 registry.register(ToolDefinition(
     name="anomaly_detection",
     description=(
-        "Detects anomalous sensor readings exceeding z-score threshold bounds. "
-        "Returns count, fraction, and timestamps of anomalous readings. "
-        "Interface placeholder for Kolla's ML-based anomaly detector."
+        "Detects anomalous sensor readings using a robust (median/MAD) z-score "
+        "against the given threshold. Returns count, fraction, timestamps and "
+        "grouped events (impacts) of anomalous readings."
     ),
     category="anomaly",
     input_schema={

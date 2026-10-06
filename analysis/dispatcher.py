@@ -302,7 +302,7 @@ class ToolDispatcher:
 
         if tool_name == "anomaly_detection":
             # Look for threshold hints in query (e.g. "threshold 3", "3 sigma")
-            threshold = 2.0
+            threshold = 5.0
             for tok in tokens:
                 try:
                     v = float(tok)
