@@ -462,7 +462,7 @@ def handle_summary_statistics(
             arr = series.to_numpy()
             arr_clean = arr[~np.isnan(arr)]
             if len(arr_clean) == 0:
-                raise ToolExecutionError(f"No valid numeric data in {metric}")
+                raise ToolExecutionError("DATA_ERROR", f"No valid numeric data in {metric}")
             
             rms_val = float(np.sqrt(np.mean(arr_clean ** 2)))
             p2p_val = float(arr_clean.max() - arr_clean.min())
