@@ -1,22 +1,43 @@
-"""Analytical Tool Architecture for Talking to Bridges (Phase 2 - Week 5).
+"""Analytical Tool Architecture for Talking to Bridges (Phase 2 - Week 6).
 
 Provides:
-- Data Access Layer for dataset reading & metadata inspection.
-- Base schemas & contracts for analytical tools (inputs, outputs, errors).
-- Tool Registry for registering, discovering, validating, and executing tools.
-- Deterministic Dummy Analytical Tools ready to be replaced by real implementations in Week 6+.
+- DataAccessLayer: central dataset reading and metadata inspection.
+- ToolExecutionError: structured exception for tool failures.
+- ToolDefinition: metadata + callable for one registered tool.
+- ToolRegistry: register, lookup, validate, and execute tools.
+- Six analytical tool handlers grounded in the actual professor dataset schema:
+    1. summary_statistics  (Eswar's statistics interface)
+    2. anomaly_detection   (Kolla's anomaly interface - z-score placeholder)
+    3. trend_analysis      (linear trend over time / relative time)
+    4. correlation_analysis (Pearson correlations between sensor columns)
+    5. model_result        (Krishna's ML inference placeholder)
+    6. chart_data          (wraps Nagarjun's visualization_service)
+
+Professor dataset column schema (from analysis/sensor_pipeline.py):
+    DateTime, Relative_Time_Sec, Sensor_1..5,
+    Condition, Test_Name, Source_File,
+    Damage_Level, Specimen, Test_Type, Hit_Group
+
+Fixture / uploaded CSV schema (tests/fixtures/bridge_sensor_data.csv):
+    timestamp, temperature, stress, deflection,
+    vibration, crack_width, sensor_id, condition
 """
 
 from __future__ import annotations
 
 import io
+import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
+
+import numpy as np
 import pandas as pd
 
 from app.core.config import settings
-from app.core.logging_config import logger
+
+logger = logging.getLogger("ttb.analysis.tools")
 
 
 # =============================================================================
@@ -24,17 +45,36 @@ from app.core.logging_config import logger
 # =============================================================================
 
 class DataAccessLayer:
-    """Central data access abstraction so analytical tools do not reimplement file reading."""
+    """Central data access abstraction so analytical tools do not re-implement
+    file reading or path resolution.
+    """
 
     def __init__(self, data_dir: Optional[Path] = None):
         self.data_dir = Path(data_dir or settings.DOCUMENTS_DIR)
 
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
+
     def load_dataset(
         self,
-        dataset_name_or_bytes: Union[str, bytes],
+        dataset_name_or_bytes: Union[str, bytes, Path],
         filename: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Loads a DataFrame from raw bytes or disk path."""
+        """Load a DataFrame from raw bytes or a disk path.
+
+        Args:
+            dataset_name_or_bytes: Raw CSV bytes, an absolute Path, or a
+                filename relative to self.data_dir.
+            filename: Hint for extension detection when bytes are passed.
+
+        Returns:
+            A cleaned DataFrame with stripped column names.
+
+        Raises:
+            FileNotFoundError: If a path-based lookup fails.
+            ValueError: If the bytes cannot be parsed as CSV.
+        """
         if isinstance(dataset_name_or_bytes, bytes):
             return self._parse_bytes(dataset_name_or_bytes, filename or "data.csv")
 
@@ -43,16 +83,18 @@ class DataAccessLayer:
             path = self.data_dir / path
 
         if not path.exists():
-            # Fallback check under documents directory
             alt_path = self.data_dir / path.name
             if alt_path.exists():
                 path = alt_path
             else:
-                raise FileNotFoundError(f"Dataset file '{dataset_name_or_bytes}' not found.")
+                raise FileNotFoundError(
+                    f"Dataset file '{dataset_name_or_bytes}' not found."
+                )
 
         return self._parse_bytes(path.read_bytes(), path.name)
 
     def _parse_bytes(self, content: bytes, filename: str) -> pd.DataFrame:
+        """Parse raw bytes as CSV with multi-encoding fallback."""
         for encoding in ("utf-8", "latin-1", "utf-8-sig"):
             try:
                 df = pd.read_csv(io.BytesIO(content), encoding=encoding)
@@ -62,12 +104,21 @@ class DataAccessLayer:
                 continue
         raise ValueError(f"Could not parse CSV content for '{filename}'.")
 
+    # ------------------------------------------------------------------
+    # Inspection
+    # ------------------------------------------------------------------
+
     def inspect_dataset(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Inspects columns, types, numerical metrics, and timestamp candidates."""
+        """Inspect column types, counts, and identify timestamp candidates.
+
+        Returns:
+            A dict with row_count, column_count, columns, numeric_columns,
+            categorical_columns, and timestamp_column (or None).
+        """
         numeric_cols = list(df.select_dtypes(include=["number"]).columns)
         categorical_cols = list(df.select_dtypes(include=["object", "category"]).columns)
-        
-        timestamp_col = None
+
+        timestamp_col: Optional[str] = None
         for col in df.columns:
             if "time" in col.lower() or "date" in col.lower():
                 timestamp_col = col
@@ -82,6 +133,38 @@ class DataAccessLayer:
             "timestamp_column": timestamp_col,
         }
 
+    def get_numeric_series(
+        self,
+        df: pd.DataFrame,
+        column: str,
+        sensor_id: Optional[str] = None,
+    ) -> pd.Series:
+        """Return a cleaned numeric series for a given column, optionally
+        filtered by sensor_id.
+
+        Args:
+            df: Source DataFrame.
+            column: Target numeric column name.
+            sensor_id: If provided, only rows where df['sensor_id'] == sensor_id
+                are used.  Ignored when the column is absent.
+
+        Returns:
+            pd.Series of float values with NaNs dropped.
+
+        Raises:
+            ToolExecutionError: When the column does not exist in df.
+        """
+        if column not in df.columns:
+            raise ToolExecutionError(
+                error_type="INVALID_INPUT",
+                message=f"Column '{column}' not found in dataset.",
+                details={"available_columns": list(df.columns)},
+            )
+        sub_df = df
+        if sensor_id is not None and "sensor_id" in df.columns:
+            sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)]
+        return pd.to_numeric(sub_df[column], errors="coerce").dropna()
+
 
 # Global Data Access Layer instance
 data_access = DataAccessLayer()
@@ -92,8 +175,14 @@ data_access = DataAccessLayer()
 # =============================================================================
 
 class ToolExecutionError(Exception):
-    """Exception raised during analytical tool execution."""
-    def __init__(self, error_type: str, message: str, details: Optional[Dict[str, Any]] = None):
+    """Structured exception raised during analytical tool execution."""
+
+    def __init__(
+        self,
+        error_type: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.error_type = error_type
         self.message = message
@@ -103,14 +192,16 @@ class ToolExecutionError(Exception):
 @dataclass
 class ToolDefinition:
     """Metadata definition for a registered analytical tool."""
+
     name: str
     description: str
-    category: str  # e.g. "statistics", "time_series", "anomaly", "visualization", "prediction"
+    category: str   # "statistics" | "anomaly" | "trend" | "correlation" | "prediction" | "visualization"
     input_schema: Dict[str, Any]
     output_schema: Dict[str, Any]
     handler: Callable[[Dict[str, Any], Optional[pd.DataFrame]], Dict[str, Any]]
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-compatible dict (handler excluded)."""
         return {
             "name": self.name,
             "description": self.description,
@@ -125,74 +216,155 @@ class ToolDefinition:
 # =============================================================================
 
 class ToolRegistry:
-    """Central registry for analytical tools."""
+    """Central registry for analytical tools.
+
+    Usage
+    -----
+    registry.register(ToolDefinition(...))
+    registry.list_tools()          -> list of dicts (for the API)
+    registry.get_tool(name)        -> ToolDefinition
+    registry.execute(name, args)   -> dict with status/data/error
+    registry.validate_arguments(name, args, df)  -> raises ToolExecutionError
+    """
 
     def __init__(self):
         self._tools: Dict[str, ToolDefinition] = {}
 
+    # ------------------------------------------------------------------
+    # Registration
+    # ------------------------------------------------------------------
+
     def register(self, tool: ToolDefinition) -> None:
-        """Register a new analytical tool."""
+        """Register a new analytical tool (overwrites any existing tool with the same name)."""
         self._tools[tool.name] = tool
-        logger.info(f"Registered analytical tool: '{tool.name}' [{tool.category}]")
+        logger.info("Registered analytical tool: '%s' [%s]", tool.name, tool.category)
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
 
     def get_tool(self, name: str) -> ToolDefinition:
-        """Retrieve a tool definition by name."""
+        """Retrieve a tool definition by name.
+
+        Raises:
+            ToolExecutionError (UNKNOWN_TOOL) if the name is not registered.
+        """
         if name not in self._tools:
             raise ToolExecutionError(
-                error_type="ToolNotFound",
-                message=f"Analytical tool '{name}' is not registered.",
-                details={"available_tools": list(self._tools.keys())}
+                error_type="UNKNOWN_TOOL",
+                message=(
+                    f"Analytical tool '{name}' is not registered. "
+                    f"Available tools: {', '.join(sorted(self._tools.keys()))}"
+                ),
+                details={"available_tools": sorted(self._tools.keys())},
             )
         return self._tools[name]
 
     def list_tools(self) -> List[Dict[str, Any]]:
-        """List metadata of all registered tools."""
+        """Return metadata of all registered tools (JSON-serializable)."""
         return [tool.to_dict() for tool in self._tools.values()]
 
-    def validate_arguments(self, tool_name: str, arguments: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> None:
-        """Validate arguments against tool input schema and optional DataFrame columns."""
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    def validate_arguments(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        df: Optional[pd.DataFrame] = None,
+    ) -> None:
+        """Validate arguments against the tool's input_schema.
+
+        Checks:
+        1. Required parameters are present and not None.
+        2. If df is provided:
+           - 'metric' / 'y_col' columns exist in df.
+           - 'sensor_id' is a valid value in df['sensor_id'] when that column exists.
+           - 'columns' list entries all exist in df.
+
+        Raises:
+            ToolExecutionError (INVALID_INPUT) on first validation failure.
+        """
         tool = self.get_tool(tool_name)
         schema = tool.input_schema
         required = schema.get("required", [])
 
-        # 1. Check required parameters
-        missing = [req for req in required if req not in arguments or arguments[req] is None]
+        # 1. Required parameter check
+        missing = [r for r in required if r not in arguments or arguments[r] is None]
         if missing:
             raise ToolExecutionError(
-                error_type="InvalidParameter",
-                message=f"Missing required parameter(s) for '{tool_name}': {', '.join(missing)}",
-                details={"required": required, "provided": list(arguments.keys())}
+                error_type="INVALID_INPUT",
+                message=(
+                    f"Missing required parameter(s) for '{tool_name}': "
+                    + ", ".join(f"'{m}'" for m in missing)
+                ),
+                details={"required": required, "provided": list(arguments.keys())},
             )
 
-        # 2. Dataset-aware column validation if df is provided
-        if df is not None:
-            if "metric" in arguments and arguments["metric"] and arguments["metric"] not in df.columns:
+        if df is None:
+            return
+
+        available_cols = list(df.columns)
+
+        # 2a. Column existence check for 'metric' and 'y_col'
+        for col_arg in ("metric", "y_col"):
+            val = arguments.get(col_arg)
+            if val and val not in df.columns:
                 raise ToolExecutionError(
-                    error_type="InvalidParameter",
-                    message=f"Metric column '{arguments['metric']}' not found in dataset.",
-                    details={"available_columns": list(df.columns)}
+                    error_type="INVALID_INPUT",
+                    message=f"Column '{val}' ('{col_arg}') not found in dataset.",
+                    details={"available_columns": available_cols},
                 )
-            if "sensor_id" in arguments and arguments["sensor_id"] and "sensor_id" in df.columns:
-                available_sensors = [str(s) for s in df["sensor_id"].dropna().unique()]
-                if str(arguments["sensor_id"]) not in available_sensors:
-                    raise ToolExecutionError(
-                        error_type="InvalidParameter",
-                        message=f"Sensor ID '{arguments['sensor_id']}' not found in dataset.",
-                        details={"available_sensors": available_sensors}
-                    )
+
+        # 2b. 'columns' list check (correlation_analysis)
+        cols_arg = arguments.get("columns")
+        if cols_arg:
+            bad = [c for c in cols_arg if c not in df.columns]
+            if bad:
+                raise ToolExecutionError(
+                    error_type="INVALID_INPUT",
+                    message=f"Columns not found in dataset: {bad}",
+                    details={"available_columns": available_cols},
+                )
+
+        # 2c. sensor_id existence check
+        sensor_id_arg = arguments.get("sensor_id")
+        if sensor_id_arg and "sensor_id" in df.columns:
+            available_ids = [str(s) for s in df["sensor_id"].dropna().unique()]
+            if str(sensor_id_arg) not in available_ids:
+                raise ToolExecutionError(
+                    error_type="INVALID_INPUT",
+                    message=f"sensor_id '{sensor_id_arg}' not found in dataset.",
+                    details={"available_sensor_ids": available_ids},
+                )
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
 
     def execute(
         self,
         tool_name: str,
         arguments: Dict[str, Any],
-        df: Optional[pd.DataFrame] = None
+        df: Optional[pd.DataFrame] = None,
     ) -> Dict[str, Any]:
-        """Execute a tool with structured parameters and error handling."""
+        """Execute a tool with structured parameters and full error handling.
+
+        Returns:
+            A JSON-serializable dict with:
+              - status: "success" | "error"
+              - tool: tool name
+              - data: result dict (on success)
+              - error_type: error code string (on failure)
+              - message: human-readable description
+              - details: supplementary dict (on failure)
+              - metadata: dict with category and arguments (on success)
+        """
         try:
             tool = self.get_tool(tool_name)
             self.validate_arguments(tool_name, arguments, df=df)
             result_data = tool.handler(arguments, df)
-            
             return {
                 "tool": tool_name,
                 "status": "success",
@@ -201,9 +373,10 @@ class ToolRegistry:
                     "category": tool.category,
                     "arguments": arguments,
                 },
-                "message": f"Tool '{tool_name}' executed successfully."
+                "message": f"Tool '{tool_name}' executed successfully.",
             }
         except ToolExecutionError as exc:
+            logger.warning("Tool '%s' failed [%s]: %s", tool_name, exc.error_type, exc.message)
             return {
                 "tool": tool_name,
                 "status": "error",
@@ -212,44 +385,97 @@ class ToolRegistry:
                 "details": exc.details,
             }
         except Exception as exc:
-            logger.exception(f"Unexpected error executing tool '{tool_name}'")
+            logger.exception("Unexpected error executing tool '%s'", tool_name)
             return {
                 "tool": tool_name,
                 "status": "error",
-                "error_type": "InternalError",
-                "message": f"Error executing tool '{tool_name}': {str(exc)}",
-                "details": {}
+                "error_type": "TOOL_EXECUTION_ERROR",
+                "message": f"Unexpected error in tool '{tool_name}': {type(exc).__name__}: {exc}",
+                "details": {},
             }
 
 
-# Global tool registry instance
+# Global registry singleton
 registry = ToolRegistry()
 
 
 # =============================================================================
-# 4. DETERMINISTIC DUMMY ANALYTICAL TOOL HANDLERS (WEEK 5 CONTRACTS)
+# 4. ANALYTICAL TOOL HANDLERS (Week 6)
 # =============================================================================
 
-def handle_summary_statistics(arguments: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
-    """Summary statistics tool handler (computes real stats if df provided, else dummy deterministic)."""
-    sensor_id = arguments.get("sensor_id", "S01")
-    metric = arguments.get("metric", "deflection")
-    
+# ---------------------------------------------------------------------------
+# Helper: resolve time column
+# ---------------------------------------------------------------------------
+
+def _resolve_time_column(df: pd.DataFrame, hint: Optional[str]) -> str:
+    """Return the best available time column name.
+
+    Priority:
+    1. Caller's explicit hint (if it exists in df).
+    2. 'Relative_Time_Sec'  (professor dataset).
+    3. 'timestamp'          (fixture CSV).
+    4. Falls back to the string 'index' (caller must use df.reset_index()).
+    """
+    if hint and hint in df.columns:
+        return hint
+    for candidate in ("Relative_Time_Sec", "timestamp", "DateTime"):
+        if candidate in df.columns:
+            return candidate
+    return "index"
+
+
+def _resolve_x_column(df: pd.DataFrame, hint: str) -> str:
+    """Resolve the X column for chart_data.  Falls back to Relative_Time_Sec
+    or timestamp if the hint is missing from the DataFrame.
+    """
+    if hint in df.columns:
+        return hint
+    for candidate in ("Relative_Time_Sec", "timestamp", "DateTime"):
+        if candidate in df.columns:
+            return candidate
+    return hint  # return as-is; validation will catch it later
+
+
+# ---------------------------------------------------------------------------
+# 4.1  summary_statistics
+# ---------------------------------------------------------------------------
+
+def handle_summary_statistics(
+    arguments: Dict[str, Any],
+    df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Compute descriptive statistics for a sensor metric.
+
+    Returns mean, std, min, max, median, count, and optionally rms and p2p.
+    Works with both the professor's processed dataset and any uploaded CSV.
+    """
+    metric = arguments["metric"]
+    sensor_id = arguments.get("sensor_id")
+
     if df is not None and metric in df.columns:
-        sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)] if "sensor_id" in df.columns and sensor_id else df
-        series = pd.to_numeric(sub_df[metric], errors="coerce").dropna()
+        try:
+            series = data_access.get_numeric_series(df, metric, sensor_id=sensor_id)
+        except ToolExecutionError:
+            series = pd.Series(dtype=float)
+
         if not series.empty:
+            arr = series.to_numpy()
+            rms_val = float(np.sqrt(np.mean(arr ** 2)))
+            p2p_val = float(arr.max() - arr.min())
             return {
                 "sensor_id": sensor_id,
                 "metric": metric,
                 "count": int(series.count()),
-                "min": float(series.min()),
-                "max": float(series.max()),
-                "mean": round(float(series.mean()), 4),
-                "std": round(float(series.std()), 4) if len(series) > 1 else 0.0,
+                "min": round(float(arr.min()), 6),
+                "max": round(float(arr.max()), 6),
+                "mean": round(float(arr.mean()), 6),
+                "median": round(float(float(np.median(arr))), 6),
+                "std": round(float(arr.std(ddof=1)) if len(arr) > 1 else 0.0, 6),
+                "rms": round(rms_val, 6),
+                "p2p": round(p2p_val, 6),
             }
 
-    # Deterministic dummy fallback contract
+    # Deterministic placeholder when no real data is available
     return {
         "sensor_id": sensor_id,
         "metric": metric,
@@ -257,200 +483,591 @@ def handle_summary_statistics(arguments: Dict[str, Any], df: Optional[pd.DataFra
         "min": 1.7,
         "max": 3.8,
         "mean": 2.54,
+        "median": 2.50,
         "std": 0.65,
+        "rms": 2.62,
+        "p2p": 2.10,
+        "_note": "Placeholder result: upload a dataset for real statistics.",
     }
 
 
-def handle_anomaly_detection(arguments: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
-    """Anomaly detection tool handler (contract for Week 6 ML implementation)."""
-    sensor_id = arguments.get("sensor_id", "S01")
-    metric = arguments.get("metric", "vibration")
+# ---------------------------------------------------------------------------
+# 4.2  anomaly_detection
+# ---------------------------------------------------------------------------
+
+def handle_anomaly_detection(
+    arguments: Dict[str, Any],
+    df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Detect anomalous readings using z-score thresholding.
+
+    This is the interface placeholder for Kolla's ML-based anomaly detector.
+    Replace the handler in the registry with Kolla's implementation while
+    keeping this input/output schema intact.
+    """
+    metric = arguments["metric"]
+    sensor_id = arguments.get("sensor_id")
     threshold = float(arguments.get("threshold", 2.0))
 
     if df is not None and metric in df.columns:
-        sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)] if "sensor_id" in df.columns and sensor_id else df
-        series = pd.to_numeric(sub_df[metric], errors="coerce").dropna()
-        if not series.empty:
-            mean = series.mean()
-            std = series.std() if len(series) > 1 else 1.0
-            z_scores = (series - mean) / (std if std > 0 else 1.0)
-            anomalies = sub_df[z_scores.abs() > threshold]
-            
-            return {
-                "sensor_id": sensor_id,
-                "metric": metric,
-                "anomaly_count": len(anomalies),
-                "threshold_z": threshold,
-                "anomalous_timestamps": list(anomalies["timestamp"].astype(str)) if "timestamp" in anomalies.columns else [],
-                "status_flag": "Alert" if len(anomalies) > 0 else "Normal",
-            }
+        try:
+            # Apply sensor_id filter if requested
+            sub_df = df
+            if sensor_id and "sensor_id" in df.columns:
+                sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)]
 
-    # Deterministic dummy contract
+            series = pd.to_numeric(sub_df[metric], errors="coerce").dropna()
+            if not series.empty:
+                mean_val = float(series.mean())
+                std_val = float(series.std()) if len(series) > 1 else 1.0
+                if std_val == 0.0:
+                    std_val = 1.0
+                z_scores = (series - mean_val) / std_val
+                mask = z_scores.abs() > threshold
+                anomalous_indices = [int(i) for i in series[mask].index.tolist()]
+
+                # Extract timestamps if available
+                ts_col = _resolve_time_column(sub_df, None)
+                if ts_col != "index" and ts_col in sub_df.columns:
+                    anomalous_timestamps = [
+                        str(sub_df[ts_col].iloc[i]) if i < len(sub_df) else ""
+                        for i in anomalous_indices
+                    ]
+                else:
+                    anomalous_timestamps = [str(i) for i in anomalous_indices]
+
+                total = int(series.count())
+                anom_count = int(mask.sum())
+                return {
+                    "sensor_id": sensor_id,
+                    "metric": metric,
+                    "threshold_z": threshold,
+                    "total_rows_checked": total,
+                    "anomaly_count": anom_count,
+                    "anomaly_fraction": round(anom_count / total, 4) if total else 0.0,
+                    "anomalous_indices": anomalous_indices[:50],  # cap for JSON safety
+                    "anomalous_timestamps": anomalous_timestamps[:50],
+                    "status_flag": "Alert" if anom_count > 0 else "Normal",
+                }
+        except Exception as exc:
+            logger.warning("Anomaly detection computation failed: %s", exc)
+
+    # Deterministic placeholder
     return {
         "sensor_id": sensor_id,
         "metric": metric,
-        "anomaly_count": 2,
         "threshold_z": threshold,
-        "anomalous_timestamps": ["2026-01-10", "2026-01-16"],
+        "total_rows_checked": 30,
+        "anomaly_count": 2,
+        "anomaly_fraction": 0.067,
+        "anomalous_indices": [6, 16],
+        "anomalous_timestamps": ["2026-01-07", "2026-01-17"],
         "status_flag": "Alert",
+        "_note": "Placeholder result: upload a dataset for real anomaly detection.",
     }
 
 
-def handle_model_result(arguments: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
-    """Model result / prediction handler (contract for Week 7 model inference)."""
-    sensor_id = arguments.get("sensor_id", "S01")
+# ---------------------------------------------------------------------------
+# 4.3  trend_analysis
+# ---------------------------------------------------------------------------
+
+def handle_trend_analysis(
+    arguments: Dict[str, Any],
+    df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Fit a linear trend to a sensor metric over time using numpy polyfit.
+
+    Reports slope, intercept, R-squared, and trend direction.
+    """
+    metric = arguments["metric"]
+    sensor_id = arguments.get("sensor_id")
+    time_hint = arguments.get("time_column")
+
+    if df is not None and metric in df.columns:
+        sub_df = df
+        if sensor_id and "sensor_id" in df.columns:
+            sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)]
+
+        time_col = _resolve_time_column(sub_df, time_hint)
+        y = pd.to_numeric(sub_df[metric], errors="coerce")
+
+        if time_col == "index" or time_col not in sub_df.columns:
+            x = pd.Series(range(len(sub_df)), index=sub_df.index, dtype=float)
+            time_col_label = "row_index"
+        else:
+            x = pd.to_numeric(sub_df[time_col], errors="coerce")
+            time_col_label = time_col
+
+        valid = pd.DataFrame({"x": x, "y": y}).dropna()
+        n = len(valid)
+
+        if n >= 2:
+            x_arr = valid["x"].to_numpy()
+            y_arr = valid["y"].to_numpy()
+            slope, intercept = np.polyfit(x_arr, y_arr, 1)
+            y_pred = slope * x_arr + intercept
+            ss_res = float(np.sum((y_arr - y_pred) ** 2))
+            ss_tot = float(np.sum((y_arr - y_arr.mean()) ** 2))
+            r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+            # Direction: flat if |slope| * range < 5% of mean amplitude
+            x_range = float(x_arr[-1] - x_arr[0])
+            amplitude_change = abs(slope * x_range)
+            mean_abs = float(np.mean(np.abs(y_arr))) or 1.0
+            if amplitude_change / mean_abs < 0.05:
+                direction = "flat"
+            elif slope > 0:
+                direction = "increasing"
+            else:
+                direction = "decreasing"
+
+            return {
+                "metric": metric,
+                "time_column": time_col_label,
+                "slope": round(float(slope), 8),
+                "intercept": round(float(intercept), 6),
+                "r_squared": round(max(0.0, min(1.0, r_squared)), 4),
+                "trend_direction": direction,
+                "data_points": n,
+                "start_value": round(float(y_arr[0]), 6),
+                "end_value": round(float(y_arr[-1]), 6),
+                "change_magnitude": round(float(y_arr[-1] - y_arr[0]), 6),
+            }
+
+    # Deterministic placeholder
+    return {
+        "metric": metric,
+        "time_column": time_hint or "Relative_Time_Sec",
+        "slope": 0.0012,
+        "intercept": 2.1,
+        "r_squared": 0.72,
+        "trend_direction": "increasing",
+        "data_points": 30,
+        "start_value": 1.9,
+        "end_value": 3.1,
+        "change_magnitude": 1.2,
+        "_note": "Placeholder result: upload a dataset for real trend analysis.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 4.4  correlation_analysis
+# ---------------------------------------------------------------------------
+
+def handle_correlation_analysis(
+    arguments: Dict[str, Any],
+    df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Compute Pearson correlation matrix between numeric sensor columns.
+
+    Works with both professor dataset sensor columns (Sensor_1..5) and
+    uploaded CSV numeric columns (deflection, vibration, stress, etc.).
+    """
+    sensor_id = arguments.get("sensor_id")
+    requested_cols = arguments.get("columns")
+
+    if df is not None:
+        sub_df = df
+        if sensor_id and "sensor_id" in df.columns:
+            sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)]
+
+        # Determine which columns to correlate
+        numeric_cols = list(sub_df.select_dtypes(include=["number"]).columns)
+        # Exclude time/index columns
+        exclude = {"Relative_Time_Sec", "DateTime", "timestamp"}
+        numeric_cols = [c for c in numeric_cols if c not in exclude]
+
+        if requested_cols:
+            use_cols = [c for c in requested_cols if c in sub_df.columns]
+        else:
+            use_cols = numeric_cols
+
+        if len(use_cols) >= 2:
+            corr_df = sub_df[use_cols].apply(pd.to_numeric, errors="coerce").corr(method="pearson")
+            # Build a JSON-safe nested dict
+            corr_dict: Dict[str, Dict[str, float]] = {}
+            for col in corr_df.columns:
+                corr_dict[col] = {}
+                for row in corr_df.index:
+                    val = corr_df.loc[row, col]
+                    corr_dict[col][row] = round(float(val), 4) if not math.isnan(val) else 0.0
+
+            # Find strongest and weakest off-diagonal pairs
+            pairs = []
+            cols_list = list(corr_df.columns)
+            for i in range(len(cols_list)):
+                for j in range(i + 1, len(cols_list)):
+                    c1, c2 = cols_list[i], cols_list[j]
+                    val = corr_df.loc[c1, c2]
+                    if not math.isnan(val):
+                        pairs.append((c1, c2, float(val)))
+
+            strongest = None
+            weakest = None
+            if pairs:
+                pairs.sort(key=lambda t: abs(t[2]), reverse=True)
+                t = pairs[0]
+                strongest = f"{t[0]} vs {t[1]} (r={t[2]:.4f})"
+                w = pairs[-1]
+                weakest = f"{w[0]} vs {w[1]} (r={w[2]:.4f})"
+
+            return {
+                "columns_used": use_cols,
+                "correlation_matrix": corr_dict,
+                "strongest_pair": strongest,
+                "weakest_pair": weakest,
+            }
+
+    # Deterministic placeholder
+    return {
+        "columns_used": ["deflection", "vibration", "stress"],
+        "correlation_matrix": {
+            "deflection": {"deflection": 1.0, "vibration": 0.87, "stress": 0.73},
+            "vibration":  {"deflection": 0.87, "vibration": 1.0,  "stress": 0.61},
+            "stress":     {"deflection": 0.73, "vibration": 0.61, "stress": 1.0},
+        },
+        "strongest_pair": "deflection vs vibration (r=0.87)",
+        "weakest_pair": "vibration vs stress (r=0.61)",
+        "_note": "Placeholder result: upload a dataset for real correlation analysis.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 4.5  model_result  (Krishna's Week 7 placeholder)
+# ---------------------------------------------------------------------------
+
+def handle_model_result(
+    arguments: Dict[str, Any],
+    df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Return a structural condition prediction (placeholder).
+
+    This is the interface contract for Krishna's ML inference engine.
+    Replace this handler in the registry with Krishna's trained model
+    while keeping this input/output schema intact.
+    """
+    sensor_id = arguments["sensor_id"]
     target_variable = arguments.get("target_variable", "condition")
 
     if df is not None and target_variable in df.columns:
-        sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)] if "sensor_id" in df.columns and sensor_id else df
+        sub_df = df
+        if "sensor_id" in df.columns:
+            sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)]
         if not sub_df.empty:
             latest = sub_df.iloc[-1]
+            features = [
+                c for c in sub_df.columns
+                if c not in {"timestamp", "sensor_id", target_variable, "DateTime"}
+            ]
+            ts_col = _resolve_time_column(sub_df, None)
+            ts_val = str(latest.get(ts_col, "latest")) if ts_col != "index" else "latest"
             return {
                 "sensor_id": sensor_id,
+                "target_variable": target_variable,
                 "predicted_class": str(latest[target_variable]),
                 "confidence": 0.92,
-                "features_used": [c for c in sub_df.columns if c not in ["timestamp", "sensor_id", target_variable]],
-                "prediction_timestamp": str(latest.get("timestamp", "latest")),
+                "features_used": features,
+                "prediction_timestamp": ts_val,
+                "model_note": "Real data lookup - replace confidence with actual model output.",
             }
 
-    # Deterministic dummy contract
     return {
         "sensor_id": sensor_id,
+        "target_variable": target_variable,
         "predicted_class": "Monitor",
         "confidence": 0.88,
         "features_used": ["temperature", "stress", "deflection", "vibration"],
         "prediction_timestamp": "2026-01-20",
+        "model_note": "Placeholder result - replace with Krishna's trained model in Week 7.",
     }
 
 
-def handle_chart_data(arguments: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
-    """Chart data generation tool handler (wraps existing visualization service)."""
-    from app.services.visualization_service import analyze_and_plot
+# ---------------------------------------------------------------------------
+# 4.6  chart_data  (wraps Nagarjun's visualization_service)
+# ---------------------------------------------------------------------------
 
+def handle_chart_data(
+    arguments: Dict[str, Any],
+    df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Generate an interactive Plotly chart payload for sensor measurements.
+
+    Wraps Nagarjun's analyze_and_plot function from visualization_service.
+    Falls back to a placeholder dict if plotly is not installed or generation fails.
+    """
+    y_col = arguments["y_col"]
     x_col = arguments.get("x_col", "timestamp")
-    y_col = arguments.get("y_col", "deflection")
 
-    if df is not None and x_col in df.columns and y_col in df.columns:
-        fig, explanation = analyze_and_plot(df, x_col, y_col)
-        return {
-            "x_col": x_col,
-            "y_col": y_col,
-            "plot_json": fig.to_json(),
-            "explanation": explanation,
-        }
+    if df is not None:
+        resolved_x = _resolve_x_column(df, x_col)
+        if resolved_x in df.columns and y_col in df.columns:
+            try:
+                from app.services.visualization_service import analyze_and_plot
+                fig, explanation = analyze_and_plot(df, resolved_x, y_col)
+                return {
+                    "x_col": resolved_x,
+                    "y_col": y_col,
+                    "plot_json": fig.to_json(),
+                    "explanation": explanation,
+                }
+            except ImportError:
+                logger.warning(
+                    "plotly is not installed; returning chart_data placeholder for '%s'.", y_col
+                )
+            except Exception as exc:
+                logger.warning("Chart generation failed for '%s' vs '%s': %s", y_col, resolved_x, exc)
 
-    # Deterministic dummy contract
     return {
         "x_col": x_col,
         "y_col": y_col,
         "plot_json": "{}",
-        "explanation": f"Generated interactive plot for {y_col} over {x_col}.",
+        "explanation": (
+            f"Chart placeholder for {y_col} over {x_col}. "
+            "Upload a dataset with compatible columns to generate a real chart."
+        ),
     }
 
 
+
 # =============================================================================
-# 5. REGISTER DUMMY TOOLS AT IMPORT TIME
+# 5. REGISTER ALL TOOLS AT IMPORT TIME
 # =============================================================================
 
 registry.register(ToolDefinition(
     name="summary_statistics",
-    description="Calculates summary statistics (count, min, max, mean, std) for a bridge sensor metric.",
+    description=(
+        "Calculates descriptive statistics (count, min, max, mean, median, std, rms, p2p) "
+        "for a numerical sensor measurement column. Owned by Eswar (statistics)."
+    ),
     category="statistics",
     input_schema={
         "type": "object",
         "properties": {
-            "sensor_id": {"type": "string", "description": "ID of the sensor (e.g., S01)"},
-            "metric": {"type": "string", "description": "Numerical measurement column (e.g., deflection, stress, vibration, temperature)"},
-            "start_time": {"type": "string", "description": "Optional start date (YYYY-MM-DD)"},
-            "end_time": {"type": "string", "description": "Optional end date (YYYY-MM-DD)"},
+            "metric": {
+                "type": "string",
+                "description": (
+                    "Numerical column name. Fixture columns: deflection, vibration, stress, "
+                    "temperature, crack_width. Professor dataset: Sensor_1..Sensor_5."
+                ),
+            },
+            "sensor_id": {
+                "type": "string",
+                "description": "Optional sensor_id filter (e.g. 'S01').",
+            },
+            "start_time": {"type": "string", "description": "Optional ISO-8601 start date."},
+            "end_time":   {"type": "string", "description": "Optional ISO-8601 end date."},
         },
         "required": ["metric"],
     },
     output_schema={
         "type": "object",
         "properties": {
-            "sensor_id": {"type": "string"},
-            "metric": {"type": "string"},
-            "count": {"type": "integer"},
-            "min": {"type": "number"},
-            "max": {"type": "number"},
-            "mean": {"type": "number"},
-            "std": {"type": "number"},
-        }
+            "sensor_id": {"type": ["string", "null"]},
+            "metric":  {"type": "string"},
+            "count":   {"type": "integer"},
+            "min":     {"type": "number"},
+            "max":     {"type": "number"},
+            "mean":    {"type": "number"},
+            "median":  {"type": "number"},
+            "std":     {"type": "number"},
+            "rms":     {"type": ["number", "null"]},
+            "p2p":     {"type": ["number", "null"]},
+        },
     },
     handler=handle_summary_statistics,
 ))
 
 registry.register(ToolDefinition(
     name="anomaly_detection",
-    description="Detects anomalous sensor readings exceeding statistical or threshold bounds.",
+    description=(
+        "Detects anomalous sensor readings exceeding z-score threshold bounds. "
+        "Returns count, fraction, and timestamps of anomalous readings. "
+        "Interface placeholder for Kolla's ML-based anomaly detector."
+    ),
     category="anomaly",
     input_schema={
         "type": "object",
         "properties": {
-            "sensor_id": {"type": "string", "description": "ID of the sensor (e.g., S01)"},
-            "metric": {"type": "string", "description": "Numerical measurement column"},
-            "threshold": {"type": "number", "description": "Z-score or deviation threshold"},
+            "metric": {
+                "type": "string",
+                "description": "Numerical column to scan for anomalies.",
+            },
+            "sensor_id": {
+                "type": "string",
+                "description": "Optional sensor_id filter.",
+            },
+            "threshold": {
+                "type": "number",
+                "description": "Z-score threshold (default 2.0).",
+                "default": 2.0,
+            },
         },
         "required": ["metric"],
     },
     output_schema={
         "type": "object",
         "properties": {
-            "sensor_id": {"type": "string"},
-            "metric": {"type": "string"},
-            "anomaly_count": {"type": "integer"},
+            "sensor_id":          {"type": ["string", "null"]},
+            "metric":             {"type": "string"},
+            "threshold_z":        {"type": "number"},
+            "total_rows_checked": {"type": "integer"},
+            "anomaly_count":      {"type": "integer"},
+            "anomaly_fraction":   {"type": "number"},
+            "anomalous_indices":  {"type": "array", "items": {"type": "integer"}},
             "anomalous_timestamps": {"type": "array", "items": {"type": "string"}},
-            "status_flag": {"type": "string"},
-        }
+            "status_flag":        {"type": "string"},
+        },
     },
     handler=handle_anomaly_detection,
 ))
 
 registry.register(ToolDefinition(
+    name="trend_analysis",
+    description=(
+        "Fits a linear trend to a sensor metric over time. "
+        "Returns slope, R-squared, trend direction (increasing/decreasing/flat), "
+        "and magnitude of change. Works on Relative_Time_Sec or any time column."
+    ),
+    category="trend",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "metric": {
+                "type": "string",
+                "description": "Numerical column to analyse for trend.",
+            },
+            "time_column": {
+                "type": "string",
+                "description": "Optional explicit time/X-axis column name.",
+            },
+            "sensor_id": {
+                "type": "string",
+                "description": "Optional sensor_id filter.",
+            },
+        },
+        "required": ["metric"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "metric":           {"type": "string"},
+            "time_column":      {"type": "string"},
+            "slope":            {"type": "number"},
+            "intercept":        {"type": "number"},
+            "r_squared":        {"type": "number"},
+            "trend_direction":  {"type": "string"},
+            "data_points":      {"type": "integer"},
+            "start_value":      {"type": "number"},
+            "end_value":        {"type": "number"},
+            "change_magnitude": {"type": "number"},
+        },
+    },
+    handler=handle_trend_analysis,
+))
+
+registry.register(ToolDefinition(
+    name="correlation_analysis",
+    description=(
+        "Computes Pearson correlation coefficients between numerical sensor columns. "
+        "Reports full correlation matrix and identifies strongest/weakest pair. "
+        "Works on Sensor_1..5 (professor dataset) or any numeric uploaded CSV columns."
+    ),
+    category="correlation",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "columns": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Columns to correlate. Defaults to all numeric columns.",
+            },
+            "sensor_id": {
+                "type": "string",
+                "description": "Optional sensor_id filter.",
+            },
+        },
+        "required": [],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "columns_used":       {"type": "array", "items": {"type": "string"}},
+            "correlation_matrix": {"type": "object"},
+            "strongest_pair":     {"type": ["string", "null"]},
+            "weakest_pair":       {"type": ["string", "null"]},
+        },
+    },
+    handler=handle_correlation_analysis,
+))
+
+registry.register(ToolDefinition(
     name="model_result",
-    description="Fetches model inference or structural condition predictions for bridge sensors.",
+    description=(
+        "Returns structural condition prediction / ML model inference result for a sensor. "
+        "Interface placeholder for Krishna's trained ML model (Week 7)."
+    ),
     category="prediction",
     input_schema={
         "type": "object",
         "properties": {
-            "sensor_id": {"type": "string", "description": "ID of the sensor (e.g., S01)"},
-            "target_variable": {"type": "string", "description": "Target variable (e.g., condition)"},
+            "sensor_id": {
+                "type": "string",
+                "description": "Sensor identifier for which a prediction is requested.",
+            },
+            "target_variable": {
+                "type": "string",
+                "description": "Target label the model predicts (e.g. 'condition').",
+                "default": "condition",
+            },
         },
         "required": ["sensor_id"],
     },
     output_schema={
         "type": "object",
         "properties": {
-            "sensor_id": {"type": "string"},
-            "predicted_class": {"type": "string"},
-            "confidence": {"type": "number"},
+            "sensor_id":            {"type": "string"},
+            "target_variable":      {"type": "string"},
+            "predicted_class":      {"type": "string"},
+            "confidence":           {"type": "number"},
+            "features_used":        {"type": "array", "items": {"type": "string"}},
             "prediction_timestamp": {"type": "string"},
-        }
+            "model_note":           {"type": "string"},
+        },
     },
     handler=handle_model_result,
 ))
 
 registry.register(ToolDefinition(
     name="chart_data",
-    description="Generates interactive chart visualization payload for sensor measurements over time.",
+    description=(
+        "Generates an interactive Plotly visualization for a sensor measurement over time. "
+        "Wraps Nagarjun's visualization_service.analyze_and_plot. "
+        "Returns the Plotly figure as a JSON string and a text explanation."
+    ),
     category="visualization",
     input_schema={
         "type": "object",
         "properties": {
-            "x_col": {"type": "string", "description": "X-axis column (default timestamp)"},
-            "y_col": {"type": "string", "description": "Y-axis numerical column (e.g., deflection)"},
+            "y_col": {
+                "type": "string",
+                "description": "Numerical Y-axis column (e.g. 'deflection', 'Sensor_1').",
+            },
+            "x_col": {
+                "type": "string",
+                "description": "X-axis column (default 'timestamp' / 'Relative_Time_Sec').",
+                "default": "timestamp",
+            },
         },
         "required": ["y_col"],
     },
     output_schema={
         "type": "object",
         "properties": {
-            "x_col": {"type": "string"},
-            "y_col": {"type": "string"},
-            "plot_json": {"type": "string"},
+            "x_col":       {"type": "string"},
+            "y_col":       {"type": "string"},
+            "plot_json":   {"type": "string"},
             "explanation": {"type": "string"},
-        }
+        },
     },
     handler=handle_chart_data,
 ))
