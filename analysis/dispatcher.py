@@ -142,6 +142,39 @@ _SENSOR_ALIASES = {
 }
 
 
+# Comparison charts (healthy vs uploaded). A comparison word is required; the other
+# words only pick which comparison chart is meant.
+_COMPARE_WORDS = {"healthy", "baseline", "compare", "comparison", "compared", "versus", "vs", "against"}
+_FEATURE_WORDS = {
+    "feature", "features", "rms", "kurtosis", "skewness", "variance", "crest", "fft",
+    "deviation", "deviations", "deviate", "range",
+}
+_HEATMAP_WORDS = {"heatmap", "heat"}
+
+
+_SENSOR_PHRASE = re.compile(r"\bsensor[\s_-]*([1-9])\b")
+
+
+def _named_sensor(query: str, df: Optional[pd.DataFrame]) -> Optional[str]:
+    """'sensor 3' / 'Sensor-3' typed in a query -> the 'Sensor_3' column, when it exists."""
+    match = _SENSOR_PHRASE.search(query.lower())
+    if match and df is not None and f"Sensor_{match.group(1)}" in df.columns:
+        return f"Sensor_{match.group(1)}"
+    return None
+
+
+def _detect_comparison(tokens: List[str]) -> Optional[str]:
+    """'signals' | 'features' | 'heatmap' when the query asks to compare with the healthy state."""
+    words = set(tokens)
+    if not words & _COMPARE_WORDS:
+        return None
+    if words & _HEATMAP_WORDS:
+        return "heatmap"
+    if words & _FEATURE_WORDS:
+        return "features"
+    return "signals"
+
+
 def _tokenize(text: str) -> List[str]:
     """Lower-case, alphanumeric + underscore tokenization."""
     return re.findall(r"[a-z0-9_]+", text.lower())
@@ -354,7 +387,12 @@ class ToolDispatcher:
             x_col = "timestamp"
             if df is not None and "Relative_Time_Sec" in df.columns:
                 x_col = "Relative_Time_Sec"
-            return {"y_col": y_col, "x_col": x_col}
+            y_col = _named_sensor(query, df) or y_col
+            args = {"y_col": y_col, "x_col": x_col}
+            comparison = _detect_comparison(tokens)
+            if comparison:
+                args["comparison"] = comparison
+            return args
 
         return {}
 
@@ -457,10 +495,17 @@ class ToolDispatcher:
             )
 
         if tool_name == "chart_data":
+            shown = (
+                "\nThe interactive chart is already displayed to the user below your reply. "
+                "Describe what it shows in plain words; do not write plotting code, image "
+                "links or instructions for drawing it."
+                if data.get("plot_json") not in (None, "", "{}")
+                else ""
+            )
             return (
                 f"[ANALYTICAL RESULT: chart_data]\n"
                 f"Chart generated for '{data.get('y_col')}' over '{data.get('x_col')}'.\n"
-                f"{data.get('explanation', '')}"
+                f"{data.get('explanation', '')}{shown}"
             )
 
         return f"[ANALYTICAL RESULT: {tool_name}]\n{data}"
