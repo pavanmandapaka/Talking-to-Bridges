@@ -26,6 +26,14 @@ st.title("Talking to Bridges")
 st.subheader("An LLM-Based Intelligent Interface for Structural Health Monitoring")
 
 
+# --- Excel Data Audit (Kolla) ---
+try:
+    from data_audit_ui import render_data_audit
+    st.markdown("---")
+    render_data_audit()
+except Exception as e:
+    st.error(f"Data Audit error: {e}")
+
 # --- Clean Sensor Data Dashboard Page ---
 from dashboard import render_dashboard
 
