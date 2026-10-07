@@ -775,14 +775,86 @@ def handle_model_result(
 # 4.6  chart_data  (wraps Nagarjun's visualization_service)
 # ---------------------------------------------------------------------------
 
+CHART_ANOMALY_THRESHOLD = 5.0  # default robust z-score for chart anomaly markers
+
+
+def _truthy(value: Any) -> bool:
+    """Interpret True / 'true' / 'yes' / 1 as True (arguments may come from an LLM)."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1", "y"}
+    return bool(value)
+
+
+def _is_sensor_recording(df: pd.DataFrame, x_col: str, y_col: str) -> bool:
+    """True for the professor's cleaned recordings (Relative_Time_Sec + Sensor_N)."""
+    return x_col == "Relative_Time_Sec" and str(y_col).lower().startswith("sensor")
+
+
+def _sensor_chart(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    arguments: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Interactive sensor chart built with analysis.charts (Week 6).
+
+    With show_anomalies=true, Kolla's detect_anomalies marks the flagged
+    readings on the line (red x markers); otherwise it is a plain line chart.
+    """
+    from analysis.charts import figure_to_json, plot_anomaly_chart, plot_time_series
+
+    if _truthy(arguments.get("show_anomalies")):
+        threshold = arguments.get("threshold")
+        if threshold is None:
+            threshold = CHART_ANOMALY_THRESHOLD
+        found = detect_anomalies(df, y_col, arguments.get("sensor_id"), threshold)
+        # Mark events (start / end / peak), not the per-reading list: that list is
+        # capped at 50 by the anomaly pipeline, events cover every flagged reading.
+        events = found["events"]
+        fig = plot_anomaly_chart(
+            df,
+            x_col=x_col,
+            sensor_col=y_col,
+            events=events,
+            flagged_count=found["anomaly_count"],
+        )
+        shown = (
+            ""
+            if found["event_count"] <= len(events)
+            else f" (the {len(events)} strongest of {found['event_count']} are shown)"
+        )
+        explanation = (
+            f"{y_col} over {x_col} with anomalies marked (threshold {found['threshold_z']}). "
+            f"{found['anomaly_count']} of {found['total_rows_checked']} readings flagged "
+            f"in {found['event_count']} event(s); status {found['status_flag']}. "
+            f"The chart marks each event's span, start/end and peak{shown}. "
+            "Values are in unknown units."
+        )
+    else:
+        fig = plot_time_series(df, x_col=x_col, y_cols=[y_col], title=f"{y_col} over time")
+        explanation = (
+            f"{y_col} plotted against {x_col} ({len(df)} readings, downsampled for display). "
+            "Values are in unknown units."
+        )
+    return {
+        "x_col": x_col,
+        "y_col": y_col,
+        "plot_json": figure_to_json(fig),
+        "explanation": explanation,
+    }
+
+
 def handle_chart_data(
     arguments: Dict[str, Any],
     df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """Generate an interactive Plotly chart payload for sensor measurements.
 
-    Wraps Nagarjun's analyze_and_plot function from visualization_service.
-    Falls back to a placeholder dict if plotly is not installed or generation fails.
+    Order of attempts (the output always has x_col, y_col, plot_json, explanation):
+      1. Professor recordings (Relative_Time_Sec + Sensor_N): analysis.charts,
+         optionally with anomalies marked (show_anomalies=true).
+      2. Any other dataset: the existing visualization_service.analyze_and_plot.
+      3. Placeholder ("{}") when there is no usable data or generation fails.
     """
     y_col = arguments["y_col"]
     x_col = arguments.get("x_col", "timestamp")
@@ -790,6 +862,32 @@ def handle_chart_data(
     if df is not None:
         resolved_x = _resolve_x_column(df, x_col)
         if resolved_x in df.columns and y_col in df.columns:
+            if y_col == resolved_x and resolved_x == "Relative_Time_Sec":
+                # Query named no sensor (dispatcher picked the time column): plot all sensors.
+                try:
+                    from analysis.charts import figure_to_json, plot_time_series, sensor_columns
+
+                    sensors = sensor_columns(df)
+                    if sensors:
+                        fig = plot_time_series(df, x_col=resolved_x, y_cols=sensors)
+                        return {
+                            "x_col": resolved_x,
+                            "y_col": ", ".join(sensors),
+                            "plot_json": figure_to_json(fig),
+                            "explanation": (
+                                f"All sensors ({', '.join(sensors)}) plotted against {resolved_x}. "
+                                "Values are in unknown units."
+                            ),
+                        }
+                except Exception as exc:
+                    logger.warning("All-sensor chart failed: %s", exc)
+            if _is_sensor_recording(df, resolved_x, y_col):
+                try:
+                    return _sensor_chart(df, resolved_x, y_col, arguments)
+                except AnomalyInputError as exc:
+                    logger.warning("Anomaly overlay failed for '%s': %s", y_col, exc.message)
+                except Exception as exc:
+                    logger.warning("Sensor chart failed for '%s': %s", y_col, exc)
             try:
                 from app.services.visualization_service import analyze_and_plot
                 fig, explanation = analyze_and_plot(df, resolved_x, y_col)
@@ -815,7 +913,6 @@ def handle_chart_data(
             "Upload a dataset with compatible columns to generate a real chart."
         ),
     }
-
 
 
 # =============================================================================
@@ -1030,8 +1127,8 @@ registry.register(ToolDefinition(
     name="chart_data",
     description=(
         "Generates an interactive Plotly visualization for a sensor measurement over time. "
-        "Wraps Nagarjun's visualization_service.analyze_and_plot. "
-        "Returns the Plotly figure as a JSON string and a text explanation."
+        "Sensor_N recordings use analysis.charts (optional anomaly markers); other data uses "
+        "visualization_service.analyze_and_plot. Returns the Plotly figure as a JSON string and a text explanation."
     ),
     category="visualization",
     input_schema={
@@ -1045,6 +1142,20 @@ registry.register(ToolDefinition(
                 "type": "string",
                 "description": "X-axis column (default 'timestamp' / 'Relative_Time_Sec').",
                 "default": "timestamp",
+            },
+            "show_anomalies": {
+                "type": "boolean",
+                "description": "Mark anomalous readings on a Sensor_N chart (optional).",
+                "default": False,
+            },
+            "threshold": {
+                "type": "number",
+                "description": "Anomaly threshold (robust z-score) used with show_anomalies.",
+                "default": 5.0,
+            },
+            "sensor_id": {
+                "type": "string",
+                "description": "Optional sensor_id filter used with show_anomalies.",
             },
         },
         "required": ["y_col"],

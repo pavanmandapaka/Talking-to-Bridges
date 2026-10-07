@@ -257,6 +257,19 @@ class ChartDataInput(BaseModel):
         default="timestamp",
         description="Column to use for the X axis.  Defaults to 'timestamp' / 'Relative_Time_Sec'.",
     )
+    show_anomalies: bool = Field(
+        default=False,
+        description="Mark anomalous readings on the chart (Sensor_N recordings).",
+    )
+    threshold: float = Field(
+        default=5.0,
+        gt=0,
+        description="Anomaly threshold (robust z-score) used when show_anomalies is true.",
+    )
+    sensor_id: Optional[str] = Field(
+        default=None,
+        description="Optional sensor_id filter used when show_anomalies is true.",
+    )
 
 
 class ChartDataOutput(BaseModel):

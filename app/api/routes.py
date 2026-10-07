@@ -63,6 +63,7 @@ class ChunkResponse(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: list[ChunkResponse] = Field(default_factory=list)
+    fig: str | None = None  # Plotly figure JSON when a chart_data tool result exists
 
 
 class UploadResponse(BaseModel):
@@ -171,6 +172,9 @@ async def upload(file: Annotated[UploadFile, File(...)]):
         raise HTTPException(status_code=400, detail=str(error))
     except (EmbeddingError, VectorStoreError) as error:
         raise HTTPException(status_code=500, detail=str(error))
+
+    # Keep the raw upload so /chat and the analytical tools can load it as a DataFrame
+    file_path.write_bytes(content)
 
     _uploaded_documents.clear()
     chunks = [
@@ -461,7 +465,20 @@ async def chat(request: ChatRequest):
         messages.append({"role": "user", "content": user_content})
 
         answer = await llm_service.generate(messages)
-        return ChatResponse(answer=answer, sources=[r.chunk for r in retrieved_chunks])
+        chart_json = None
+        if (
+            dispatch_result
+            and dispatch_result.status == "success"
+            and dispatch_result.tool_name == "chart_data"
+        ):
+            candidate = dispatch_result.data.get("plot_json") if dispatch_result.data else None
+            if candidate and candidate != "{}":
+                chart_json = candidate
+        return ChatResponse(
+            answer=answer,
+            sources=[r.chunk for r in retrieved_chunks],
+            fig=chart_json,
+        )
 
     except Exception as e:
         logger.exception("Chat endpoint error")

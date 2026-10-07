@@ -257,18 +257,45 @@ tool.handler = krishna_ml_inference_handler
 
 ### 5.6 chart_data
 
-**Owner:** Nagarjun (visualization — wraps existing service)  
+**Owner:** Nagarjun (visualization)  
 **Category:** visualization  
 
 | Input | Type | Required | Description |
 |---|---|---|---|
 | `y_col` | string | ✓ | Y-axis column |
 | `x_col` | string | | X-axis column (default `"timestamp"`) |
+| `show_anomalies` | boolean | | Mark anomalous readings on a `Sensor_N` chart (default `false`) |
+| `threshold` | number | | Anomaly threshold used with `show_anomalies` (default `5.0`, same as the real-data default of `anomaly_detection`) |
+| `sensor_id` | string | | Optional `sensor_id` filter used with `show_anomalies` |
 
 | Output field | Type | Description |
 |---|---|---|
-| `plot_json` | string | Plotly figure serialised to JSON |
+| `x_col` | string | X column actually used |
+| `y_col` | string | Y column(s) actually plotted |
+| `plot_json` | string | Plotly figure serialised to JSON (`"{}"` when no chart could be built) |
 | `explanation` | string | Human-readable chart summary |
+
+**Behaviour (Week 6):**
+
+1. Professor recordings (`Relative_Time_Sec` + `Sensor_N`): an interactive line chart built by
+   `analysis/charts.py`, downsampled to about 5000 points. If the query names no sensor, all
+   sensors are plotted. With `show_anomalies=true`, anomalies from `anomaly_detection`
+   (Kolla's pipeline) are marked per **event**: a shaded span from each event's start to end,
+   markers at its start/end and at its peak. Events are used (not the per-reading lists, which
+   the pipeline caps at 50), so a recording with thousands of flagged readings is still shown
+   in full; the explanation gives the true flagged count.
+2. Any other dataset: the existing `app.services.visualization_service.analyze_and_plot`.
+3. No usable data: the placeholder result (`plot_json = "{}"`).
+
+The input and output contract is unchanged; the new input fields are optional.
+
+**Chat flow:** `/chat` returns the figure as `fig` in `ChatResponse` when the dispatched tool is
+`chart_data`, and the Streamlit app renders it with `st.plotly_chart`. For this the upload route
+keeps the raw uploaded CSV in `DOCUMENTS_DIR` so `/chat` can load it as the active DataFrame.
+
+**Known limitation:** the chat endpoint also sends retrieved CSV text to the LLM. For full-size
+recordings (about 130 characters per row) this can exceed the Groq request size limit (HTTP 413).
+Use a smaller file for demos until the context size is capped.
 
 ---
 
