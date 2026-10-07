@@ -104,10 +104,15 @@ _INTENT_RULES: List[tuple] = [
         "correlat", "correlation", "relationship", "relation",
         "compare sensors", "compare columns",
     }),
+    # Baseline / reference state
+    ("baseline", {
+        "baseline", "healthy", "healthy baseline", "deviation",
+        "deviation ranking", "normal baseline", "reference state",
+    }),
     # Prediction / model
     ("model_result", {
         "predict", "condition", "classify", "classification",
-        "model", "forecast", "ml", "damage level",
+        "model", "forecast", "ml", "damage level", "damage class", "severity",
     }),
     # Summary statistics  (broadest, check LAST)
     ("summary_statistics", {
@@ -335,6 +340,14 @@ class ToolDispatcher:
                 "target_variable": "condition",
             }
 
+        if tool_name == "baseline":
+            args = {}
+            if sensor_id:
+                args["sensor_id"] = sensor_id
+            if metric:
+                args["metric"] = metric
+            return args
+
         if tool_name == "chart_data":
             y_col = metric or "deflection"
             # X column: prefer Relative_Time_Sec if available in df
@@ -372,17 +385,30 @@ class ToolDispatcher:
             )
 
         if tool_name == "anomaly_detection":
-            return (
-                f"[ANALYTICAL RESULT: anomaly_detection]\n"
-                f"Metric: {metric}{sensor_str}  |  "
-                f"Z-score threshold: {data.get('threshold_z')}\n"
-                f"Total rows checked: {data.get('total_rows_checked')}  |  "
-                f"Anomalies found: {data.get('anomaly_count')} "
-                f"({data.get('anomaly_fraction', 0)*100:.1f}%)\n"
-                f"Status: {data.get('status_flag')}\n"
-                f"Anomalous timestamps (first 5): "
-                f"{data.get('anomalous_timestamps', [])[:5]}"
-            )
+            event_count = data.get("event_count", 0)
+            max_abs_z = data.get("max_abs_z")
+            events = data.get("events", [])
+
+            lines = [
+                "[ANALYTICAL RESULT: anomaly_detection]",
+                f"Metric: {metric}{sensor_str}  |  Z-score threshold: {data.get('threshold_z')}",
+                f"Total rows checked: {data.get('total_rows_checked')}  |  Anomalies found: {data.get('anomaly_count')} ({data.get('anomaly_fraction', 0)*100:.1f}%)",
+                f"Status: {data.get('status_flag')}",
+            ]
+            if max_abs_z is not None:
+                lines.append(f"Peak score: {max_abs_z} (max z-score)")
+            if event_count > 0 or events:
+                lines.append(f"Event count: {event_count} detected event(s)")
+                if events:
+                    ev_previews = []
+                    for ev in events[:3]:
+                        pz = ev.get("peak_z", ev.get("peak_score", ""))
+                        pv = ev.get("peak_value", "")
+                        ev_previews.append(f"Event (start: {ev.get('start_time', ev.get('start_index'))}, peak Z: {pz}, peak val: {pv})")
+                    lines.append(f"Event details: {'; '.join(ev_previews)}")
+            elif data.get("anomalous_timestamps"):
+                lines.append(f"Anomalous timestamps (first 5): {data.get('anomalous_timestamps', [])[:5]}")
+            return "\n".join(lines)
 
         if tool_name == "trend_analysis":
             return (
@@ -404,13 +430,29 @@ class ToolDispatcher:
                 f"Weakest correlation:   {data.get('weakest_pair')}"
             )
 
+        if tool_name == "baseline":
+            rankings = data.get("deviation_ranking", [])
+            rank_str = ", ".join([f"{r.get('sensor')}: {r.get('deviation_score')} ({r.get('status')})" for r in rankings[:3]])
+            return (
+                f"[ANALYTICAL RESULT: baseline]\n"
+                f"Status: {data.get('status')}  |  "
+                f"Sensors evaluated: {', '.join(data.get('sensors_evaluated', []))}\n"
+                f"Deviation ranking: {rank_str}\n"
+                f"Note: {data.get('note', '')}"
+            )
+
         if tool_name == "model_result":
+            damage_str = f"  |  Damage Class: {data.get('damage_class')}" if data.get('damage_class') else ""
+            sev_str = f"  |  Severity: {data.get('severity')}" if data.get('severity') else ""
+            contrib = data.get('contributing_parameters', [])
+            contrib_str = f"\nContributing parameters: {', '.join(contrib)}" if contrib else ""
             return (
                 f"[ANALYTICAL RESULT: model_result]\n"
                 f"Sensor: {data.get('sensor_id')}  |  "
                 f"Target: {data.get('target_variable')}\n"
-                f"Predicted condition: {data.get('predicted_class')}  |  "
-                f"Confidence: {data.get('confidence', 0)*100:.0f}%\n"
+                f"Predicted condition: {data.get('predicted_class')}{damage_str}{sev_str}  |  "
+                f"Confidence: {data.get('confidence', 0)*100:.0f}%"
+                f"{contrib_str}\n"
                 f"Note: {data.get('model_note', '')}"
             )
 

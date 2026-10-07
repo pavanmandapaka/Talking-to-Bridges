@@ -100,6 +100,7 @@ class TestToolRegistryCore:
             "correlation_analysis",
             "model_result",
             "chart_data",
+            "baseline",
         }
 
     def test_register_and_lookup_custom_tool(self):
@@ -127,7 +128,7 @@ class TestToolRegistryCore:
         # Must not raise
         text = json.dumps(tools)
         parsed = json.loads(text)
-        assert len(parsed) == 6
+        assert len(parsed) == 7
 
     def test_handler_replacement_pattern(self):
         """Simulates how Kolla/Eswar/Krishna would swap in real implementations."""
@@ -506,10 +507,11 @@ class TestToolDispatcher:
 
     def test_list_available_tools(self):
         tools = dispatcher.list_available_tools()
-        assert len(tools) == 6
+        assert len(tools) == 7
         names = {t["name"] for t in tools}
         assert "trend_analysis" in names
         assert "correlation_analysis" in names
+        assert "baseline" in names
 
 
 # =============================================================================
@@ -565,7 +567,7 @@ class TestPydanticSchemas:
     def test_schema_registries_cover_all_tools(self):
         expected = {
             "summary_statistics", "anomaly_detection", "trend_analysis",
-            "correlation_analysis", "model_result", "chart_data",
+            "correlation_analysis", "model_result", "chart_data", "baseline",
         }
         assert set(TOOL_INPUT_SCHEMAS.keys()) == expected
         assert set(TOOL_OUTPUT_SCHEMAS.keys()) == expected

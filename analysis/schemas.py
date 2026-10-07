@@ -240,6 +240,45 @@ class ModelResultOutput(BaseModel):
     features_used: List[str] = Field(default_factory=list)
     prediction_timestamp: str
     model_note: str = "Placeholder result - replace with Krishna's trained model in Week 7."
+    damage_class: Optional[str] = Field(
+        default=None,
+        description="Categorical damage classification (e.g. 'Damaged_3mm', 'Undamaged').",
+    )
+    severity: Optional[str] = Field(
+        default=None,
+        description="Severity level (e.g. 'High', 'Medium', 'Low', 'None').",
+    )
+    contributing_parameters: List[str] = Field(
+        default_factory=list,
+        description="Sensors or features contributing to the predicted condition.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. baseline (placeholder for Eswar's healthy baseline module)
+# ---------------------------------------------------------------------------
+
+class BaselineInput(BaseModel):
+    """Input schema for the baseline tool."""
+
+    sensor_id: Optional[str] = Field(
+        default=None,
+        description="Optional sensor ID filter (e.g. 'Sensor_1', 'S01').",
+    )
+    metric: Optional[str] = Field(
+        default=None,
+        description="Optional metric or column name to evaluate against healthy baseline.",
+    )
+
+
+class BaselineOutput(BaseModel):
+    """Structured result from the baseline tool."""
+
+    status: str = Field(..., description="Overall baseline status ('Healthy', 'Degraded', 'Alert').")
+    sensors_evaluated: List[str] = Field(default_factory=list)
+    deviation_ranking: List[Dict[str, Any]] = Field(default_factory=list)
+    healthy_baseline_summary: Dict[str, Any] = Field(default_factory=dict)
+    note: str = "Dummy baseline result - pluggable with Eswar's real baseline module."
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +331,7 @@ TOOL_INPUT_SCHEMAS: Dict[str, type] = {
     "correlation_analysis": CorrelationAnalysisInput,
     "model_result": ModelResultInput,
     "chart_data": ChartDataInput,
+    "baseline": BaselineInput,
 }
 
 TOOL_OUTPUT_SCHEMAS: Dict[str, type] = {
@@ -301,4 +341,5 @@ TOOL_OUTPUT_SCHEMAS: Dict[str, type] = {
     "correlation_analysis": CorrelationAnalysisOutput,
     "model_result": ModelResultOutput,
     "chart_data": ChartDataOutput,
+    "baseline": BaselineOutput,
 }

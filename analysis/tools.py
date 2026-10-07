@@ -333,7 +333,7 @@ class ToolRegistry:
         sensor_id_arg = arguments.get("sensor_id")
         if sensor_id_arg and "sensor_id" in df.columns:
             available_ids = [str(s) for s in df["sensor_id"].dropna().unique()]
-            if str(sensor_id_arg) not in available_ids:
+            if str(sensor_id_arg) not in available_ids and str(sensor_id_arg) not in df.columns:
                 raise ToolExecutionError(
                     error_type="INVALID_INPUT",
                     message=f"sensor_id '{sensor_id_arg}' not found in dataset.",
@@ -729,20 +729,19 @@ def handle_model_result(
     arguments: Dict[str, Any],
     df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-    """Return a structural condition prediction (placeholder).
+    """Return a structural condition prediction (placeholder/interface).
 
     This is the interface contract for Krishna's ML inference engine.
-    Replace this handler in the registry with Krishna's trained model
-    while keeping this input/output schema intact.
+    Supports damage_class, severity, confidence, and contributing_parameters.
     """
     sensor_id = arguments["sensor_id"]
     target_variable = arguments.get("target_variable", "condition")
 
-    if df is not None and target_variable in df.columns:
+    if df is not None:
         sub_df = df
         if "sensor_id" in df.columns:
             sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)]
-        if not sub_df.empty:
+        if not sub_df.empty and target_variable in sub_df.columns:
             latest = sub_df.iloc[-1]
             features = [
                 c for c in sub_df.columns
@@ -750,12 +749,16 @@ def handle_model_result(
             ]
             ts_col = _resolve_time_column(sub_df, None)
             ts_val = str(latest.get(ts_col, "latest")) if ts_col != "index" else "latest"
+            damage_cls = str(latest.get("Damage_Level", latest.get("condition", "Damaged")))
             return {
                 "sensor_id": sensor_id,
                 "target_variable": target_variable,
                 "predicted_class": str(latest[target_variable]),
+                "damage_class": damage_cls,
+                "severity": "Medium" if "Damaged" in damage_cls else "Low",
                 "confidence": 0.92,
                 "features_used": features,
+                "contributing_parameters": features[:3] if features else [sensor_id],
                 "prediction_timestamp": ts_val,
                 "model_note": "Real data lookup - replace confidence with actual model output.",
             }
@@ -764,10 +767,83 @@ def handle_model_result(
         "sensor_id": sensor_id,
         "target_variable": target_variable,
         "predicted_class": "Monitor",
+        "damage_class": "Moderate_Damage",
+        "severity": "Medium",
         "confidence": 0.88,
         "features_used": ["temperature", "stress", "deflection", "vibration"],
+        "contributing_parameters": ["vibration", "deflection"],
         "prediction_timestamp": "2026-01-20",
         "model_note": "Placeholder result - replace with Krishna's trained model in Week 7.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 4.6  baseline  (Eswar's healthy baseline / deviation placeholder)
+# ---------------------------------------------------------------------------
+
+def handle_baseline(
+    arguments: Dict[str, Any],
+    df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Evaluate current sensor readings against a healthy baseline (dummy first).
+
+    Pluggable interface: Eswar's healthy-baseline / deviation ranking function
+    can replace this handler without changing the tool registry or dispatcher contract.
+    """
+    sensor_id = arguments.get("sensor_id")
+    metric = arguments.get("metric")
+
+    if df is not None:
+        numeric_cols = list(df.select_dtypes(include=["number"]).columns)
+        exclude = {"Relative_Time_Sec", "DateTime", "timestamp"}
+        eval_sensors = [c for c in numeric_cols if c not in exclude]
+        if sensor_id and sensor_id in df.columns and sensor_id not in eval_sensors:
+            eval_sensors.append(sensor_id)
+        if not eval_sensors:
+            eval_sensors = ["Sensor_1", "Sensor_2", "Sensor_3"]
+
+        ranking = []
+        baseline_info = {}
+        for s in eval_sensors[:5]:
+            series = pd.to_numeric(df[s], errors="coerce").dropna()
+            if not series.empty:
+                mean_val = float(series.mean())
+                std_val = float(series.std()) if len(series) > 1 else 1.0
+                max_val = float(series.max())
+                dev_score = round(abs(max_val - mean_val) / (std_val if std_val > 0 else 1.0), 3)
+                ranking.append({
+                    "sensor": s,
+                    "deviation_score": dev_score,
+                    "status": "Normal" if dev_score < 2.5 else "Degraded",
+                })
+                baseline_info[s] = {"healthy_mean": round(mean_val, 4), "healthy_std": round(std_val, 4)}
+
+        ranking.sort(key=lambda x: x["deviation_score"], reverse=True)
+        max_dev = ranking[0]["deviation_score"] if ranking else 0.0
+        overall_status = "Healthy" if max_dev < 2.5 else ("Alert" if max_dev > 4.0 else "Degraded")
+
+        return {
+            "status": overall_status,
+            "sensors_evaluated": eval_sensors,
+            "deviation_ranking": ranking,
+            "healthy_baseline_summary": baseline_info,
+            "note": "Baseline evaluated on current dataset (ready for Eswar's healthy baseline module).",
+        }
+
+    # Deterministic dummy placeholder when no df is available
+    return {
+        "status": "Healthy",
+        "sensors_evaluated": ["Sensor_1", "Sensor_2", "Sensor_3", "Sensor_4", "Sensor_5"],
+        "deviation_ranking": [
+            {"sensor": "Sensor_3", "deviation_score": 1.42, "status": "Normal"},
+            {"sensor": "Sensor_1", "deviation_score": 0.85, "status": "Normal"},
+            {"sensor": "Sensor_2", "deviation_score": 0.31, "status": "Normal"},
+        ],
+        "healthy_baseline_summary": {
+            "Sensor_1": {"healthy_mean": 0.02, "healthy_std": 0.005},
+            "Sensor_3": {"healthy_mean": 0.015, "healthy_std": 0.004},
+        },
+        "note": "Dummy baseline result - pluggable with Eswar's real baseline module.",
     }
 
 
@@ -1111,16 +1187,53 @@ registry.register(ToolDefinition(
     output_schema={
         "type": "object",
         "properties": {
-            "sensor_id":            {"type": "string"},
-            "target_variable":      {"type": "string"},
-            "predicted_class":      {"type": "string"},
-            "confidence":           {"type": "number"},
-            "features_used":        {"type": "array", "items": {"type": "string"}},
-            "prediction_timestamp": {"type": "string"},
-            "model_note":           {"type": "string"},
+            "sensor_id":               {"type": "string"},
+            "target_variable":         {"type": "string"},
+            "predicted_class":         {"type": "string"},
+            "confidence":              {"type": "number"},
+            "features_used":           {"type": "array", "items": {"type": "string"}},
+            "prediction_timestamp":    {"type": "string"},
+            "model_note":              {"type": "string"},
+            "damage_class":            {"type": ["string", "null"]},
+            "severity":                {"type": ["string", "null"]},
+            "contributing_parameters": {"type": "array", "items": {"type": "string"}},
         },
     },
     handler=handle_model_result,
+))
+
+registry.register(ToolDefinition(
+    name="baseline",
+    description=(
+        "Evaluates sensor readings against healthy baseline values and produces "
+        "a deviation ranking. Placeholder for Eswar's healthy baseline module."
+    ),
+    category="statistics",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "sensor_id": {
+                "type": "string",
+                "description": "Optional sensor_id filter.",
+            },
+            "metric": {
+                "type": "string",
+                "description": "Optional metric or column name.",
+            },
+        },
+        "required": [],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "status":                   {"type": "string"},
+            "sensors_evaluated":        {"type": "array", "items": {"type": "string"}},
+            "deviation_ranking":        {"type": "array"},
+            "healthy_baseline_summary": {"type": "object"},
+            "note":                     {"type": "string"},
+        },
+    },
+    handler=handle_baseline,
 ))
 
 registry.register(ToolDefinition(
