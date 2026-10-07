@@ -775,6 +775,9 @@ def handle_model_result(
 # 4.6  chart_data  (wraps Nagarjun's visualization_service)
 # ---------------------------------------------------------------------------
 
+CHART_ANOMALY_THRESHOLD = 5.0  # default robust z-score for chart anomaly markers
+
+
 def _truthy(value: Any) -> bool:
     """Interpret True / 'true' / 'yes' / 1 as True (arguments may come from an LLM)."""
     if isinstance(value, str):
@@ -801,18 +804,30 @@ def _sensor_chart(
     from analysis.charts import figure_to_json, plot_anomaly_chart, plot_time_series
 
     if _truthy(arguments.get("show_anomalies")):
-        found = detect_anomalies(
-            df, y_col, arguments.get("sensor_id"), arguments.get("threshold", 2.0)
+        threshold = arguments.get("threshold")
+        if threshold is None:
+            threshold = CHART_ANOMALY_THRESHOLD
+        found = detect_anomalies(df, y_col, arguments.get("sensor_id"), threshold)
+        # Mark events (start / end / peak), not the per-reading list: that list is
+        # capped at 50 by the anomaly pipeline, events cover every flagged reading.
+        events = found["events"]
+        fig = plot_anomaly_chart(
+            df,
+            x_col=x_col,
+            sensor_col=y_col,
+            events=events,
+            flagged_count=found["anomaly_count"],
         )
-        marked = df.copy()
-        marked["is_anomaly"] = False
-        if found["anomalous_indices"]:
-            marked.iloc[found["anomalous_indices"], marked.columns.get_loc("is_anomaly")] = True
-        fig = plot_anomaly_chart(marked, x_col=x_col, sensor_col=y_col)
+        shown = (
+            ""
+            if found["event_count"] <= len(events)
+            else f" (the {len(events)} strongest of {found['event_count']} are shown)"
+        )
         explanation = (
-            f"{y_col} over {x_col} with anomalies marked. "
+            f"{y_col} over {x_col} with anomalies marked (threshold {found['threshold_z']}). "
             f"{found['anomaly_count']} of {found['total_rows_checked']} readings flagged "
             f"in {found['event_count']} event(s); status {found['status_flag']}. "
+            f"The chart marks each event's span, start/end and peak{shown}. "
             "Values are in unknown units."
         )
     else:
@@ -1136,7 +1151,7 @@ registry.register(ToolDefinition(
             "threshold": {
                 "type": "number",
                 "description": "Anomaly threshold (robust z-score) used with show_anomalies.",
-                "default": 2.0,
+                "default": 5.0,
             },
             "sensor_id": {
                 "type": "string",

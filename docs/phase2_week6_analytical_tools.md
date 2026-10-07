@@ -265,7 +265,7 @@ tool.handler = krishna_ml_inference_handler
 | `y_col` | string | ✓ | Y-axis column |
 | `x_col` | string | | X-axis column (default `"timestamp"`) |
 | `show_anomalies` | boolean | | Mark anomalous readings on a `Sensor_N` chart (default `false`) |
-| `threshold` | number | | Anomaly threshold used with `show_anomalies` (default `2.0`) |
+| `threshold` | number | | Anomaly threshold used with `show_anomalies` (default `5.0`, same as the real-data default of `anomaly_detection`) |
 | `sensor_id` | string | | Optional `sensor_id` filter used with `show_anomalies` |
 
 | Output field | Type | Description |
@@ -279,8 +279,11 @@ tool.handler = krishna_ml_inference_handler
 
 1. Professor recordings (`Relative_Time_Sec` + `Sensor_N`): an interactive line chart built by
    `analysis/charts.py`, downsampled to about 5000 points. If the query names no sensor, all
-   sensors are plotted. With `show_anomalies=true`, readings flagged by `anomaly_detection`
-   (Kolla's pipeline) are marked with red markers.
+   sensors are plotted. With `show_anomalies=true`, anomalies from `anomaly_detection`
+   (Kolla's pipeline) are marked per **event**: a shaded span from each event's start to end,
+   markers at its start/end and at its peak. Events are used (not the per-reading lists, which
+   the pipeline caps at 50), so a recording with thousands of flagged readings is still shown
+   in full; the explanation gives the true flagged count.
 2. Any other dataset: the existing `app.services.visualization_service.analyze_and_plot`.
 3. No usable data: the placeholder result (`plot_json = "{}"`).
 

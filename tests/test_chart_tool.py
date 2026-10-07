@@ -49,13 +49,14 @@ def test_anomaly_overlay_marks_the_impact(recording):
     assert res["status"] == "success"
     fig = _fig(res)
     names = [t["name"] for t in fig["data"]]
-    assert "Anomaly" in names
+    assert "Event peak" in names
+    assert len(fig["layout"]["shapes"]) >= 1  # one shaded span per event
     assert "flagged" in res["data"]["explanation"]
 
 
 def test_anomaly_overlay_accepts_string_flag(recording):
     res = registry.execute("chart_data", {"y_col": "Sensor_1", "show_anomalies": "true"}, recording)
-    assert "Anomaly" in [t["name"] for t in _fig(res)["data"]]
+    assert "Event peak" in [t["name"] for t in _fig(res)["data"]]
 
 
 def test_output_contract_keys(recording):
@@ -80,6 +81,37 @@ def test_schema_accepts_new_optional_fields():
     m = ChartDataInput(y_col="Sensor_1", show_anomalies=True, threshold=3.0)
     assert m.show_anomalies is True and m.threshold == 3.0
     assert ChartDataInput(y_col="Sensor_1").show_anomalies is False
+
+
+def test_default_threshold_is_5():
+    assert ChartDataInput(y_col="Sensor_1").threshold == 5.0
+    schema = registry.get_tool("chart_data").input_schema
+    assert schema["properties"]["threshold"]["default"] == 5.0
+
+
+def test_threshold_omitted_uses_5(recording):
+    res = registry.execute("chart_data", {"y_col": "Sensor_1", "show_anomalies": True}, recording)
+    assert "threshold 5.0" in res["data"]["explanation"]
+
+
+def test_many_flagged_readings_still_marked_as_events():
+    """The anomaly tool caps its index list at 50; the chart must not."""
+    import numpy as np
+    import pandas as pd
+
+    n = 6000
+    rng = np.random.default_rng(1)
+    s1 = rng.normal(0, 1, n)
+    s1[1000:1300] += 40  # 300 flagged readings in one event
+    s1[4000:4200] -= 40  # 200 more in a second event
+    df = pd.DataFrame({"Relative_Time_Sec": np.arange(n) / 100.0, "Sensor_1": s1})
+    res = registry.execute("chart_data", {"y_col": "Sensor_1", "show_anomalies": True}, df)
+    fig = _fig(res)
+    assert len(fig["layout"]["shapes"]) == 2
+    peaks = [t for t in fig["data"] if t["name"] == "Event peak"]
+    assert len(peaks) == 1 and len(peaks[0]["x"]) == 2
+    assert "events" in res["data"]["explanation"] or "event(s)" in res["data"]["explanation"]
+    assert "500 of" in res["data"]["explanation"]
 
 
 def test_no_sensor_named_plots_all_sensors(recording):

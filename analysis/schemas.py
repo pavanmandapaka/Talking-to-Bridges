@@ -262,7 +262,7 @@ class ChartDataInput(BaseModel):
         description="Mark anomalous readings on the chart (Sensor_N recordings).",
     )
     threshold: float = Field(
-        default=2.0,
+        default=5.0,
         gt=0,
         description="Anomaly threshold (robust z-score) used when show_anomalies is true.",
     )

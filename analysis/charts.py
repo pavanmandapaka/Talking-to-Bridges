@@ -66,6 +66,39 @@ def plot_time_series(
     return fig
 
 
+def _py(value):
+    """numpy scalar -> plain Python value (keeps the figure JSON simple)."""
+    return value.item() if hasattr(value, "item") else value
+
+
+def _add_events(fig: go.Figure, df: pd.DataFrame, x_col: str, sensor_col: str, events) -> None:
+    """Mark each anomaly event: shaded span, start/end points and the peak."""
+    x, y = df[x_col], df[sensor_col]
+    peak_rows, edge_rows = [], []
+    for ev in events:
+        start, end, peak = int(ev["start_index"]), int(ev["end_index"]), int(ev["peak_index"])
+        fig.add_vrect(
+            x0=_py(x.iloc[start]), x1=_py(x.iloc[end]),
+            fillcolor="red", opacity=0.15, line_width=0, layer="below",
+        )
+        edge_rows += [start, end]
+        peak_rows.append(peak)
+    if edge_rows:
+        fig.add_trace(
+            go.Scattergl(
+                x=x.iloc[edge_rows].tolist(), y=y.iloc[edge_rows].tolist(), mode="markers",
+                name="Event start/end", marker={"color": "orange", "size": 6, "symbol": "circle"},
+            )
+        )
+    if peak_rows:
+        fig.add_trace(
+            go.Scattergl(
+                x=x.iloc[peak_rows].tolist(), y=y.iloc[peak_rows].tolist(), mode="markers",
+                name="Event peak", marker={"color": "red", "size": 10, "symbol": "x"},
+            )
+        )
+
+
 def plot_anomaly_chart(
     df: pd.DataFrame,
     x_col: str = DEFAULT_X,
@@ -73,12 +106,21 @@ def plot_anomaly_chart(
     anomaly_col: str = "is_anomaly",
     anomaly_x: Iterable[float] | None = None,
     max_points: int = MAX_POINTS,
+    events: Sequence[dict] | None = None,
+    flagged_count: int | None = None,
 ) -> go.Figure:
     """Sensor line with anomalies marked.
 
-    Anomalies come from a boolean column (`anomaly_col`) or a list of x values
-    (`anomaly_x`, e.g. timestamps returned by the anomaly-detection tool).
-    Anomaly points are taken from the full data, so none are lost by downsampling.
+    Three ways to say what is anomalous:
+      * `events`: the `events` list of the anomaly-detection tool (start_index,
+        end_index, peak_index per event, row positions in `df`). Each event gets a
+        shaded span, start/end points and a peak marker. Use this for real
+        recordings: the tool caps its per-reading lists at 50, but events cover
+        every flagged reading.
+      * `anomaly_col`: a boolean column in `df`.
+      * `anomaly_x`: a list of x values.
+    `flagged_count` only changes the title (the number of flagged readings).
+    Marked points are taken from the full data, so none are lost by downsampling.
     """
     _check(df, x_col, [sensor_col])
     plot_df = downsample(df, max_points)
@@ -91,7 +133,10 @@ def plot_anomaly_chart(
             line={"width": 1},
         )
     )
-    if anomaly_x is not None:
+    if events is not None:
+        pts = df.iloc[0:0]
+        _add_events(fig, df, x_col, sensor_col, events)
+    elif anomaly_x is not None:
         pts = df[df[x_col].isin(list(anomaly_x))]
     elif anomaly_col in df.columns:
         pts = df[df[anomaly_col].fillna(False).astype(bool)]
@@ -107,8 +152,10 @@ def plot_anomaly_chart(
                 marker={"color": "red", "size": 8, "symbol": "x"},
             )
         )
+    count = flagged_count if flagged_count is not None else len(pts)
+    detail = f"{count} flagged in {len(events)} event(s)" if events is not None else f"{count} flagged"
     fig.update_layout(
-        title=f"Anomalies: {sensor_col} ({len(pts)} flagged, {UNITS_NOTE})",
+        title=f"Anomalies: {sensor_col} ({detail}, {UNITS_NOTE})",
         xaxis_title="Relative time (s)" if x_col == DEFAULT_X else str(x_col),
         yaxis_title="Sensor value", hovermode="x unified",
     )
