@@ -920,6 +920,111 @@ def _sensor_chart(
     }
 
 
+COMPARISON_MODES = ("signals", "features", "heatmap")
+COMPARISON_TOP_N = 12
+
+
+def _comparison_chart(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    mode: str,
+) -> Dict[str, Any]:
+    """Healthy-vs-uploaded comparison charts (faculty requirement 5).
+
+    signals  - healthy recording overlaid on the uploaded one, one panel per sensor
+    features - feature values against the healthy range (analysis.features.rank_deviations)
+    heatmap  - the same deviations as a sensor x feature grid
+
+    The healthy reference is read from the reference folder (analysis.healthy_reference).
+    When it is missing the result is the usual placeholder with an explanation.
+    """
+    from analysis.charts import (
+        Z_LIMIT,
+        figure_to_json,
+        plot_deviation_heatmap,
+        plot_feature_deviation,
+        plot_recording_comparison,
+        sensor_columns,
+    )
+    from analysis.features import build_healthy_baseline, rank_deviations
+    from analysis.healthy_reference import load_healthy_recordings, reference_dir
+
+    def _placeholder(reason: str) -> Dict[str, Any]:
+        return {"x_col": x_col, "y_col": y_col, "plot_json": "{}", "explanation": reason}
+
+    healthy = load_healthy_recordings()
+    if not healthy:
+        return _placeholder(
+            "Cannot compare with the healthy state: no healthy reference recording is available "
+            f"(expected .csv/.xlsx/.xlsm files in '{reference_dir()}')."
+        )
+    sensor = y_col if str(y_col).startswith("Sensor_") and y_col in df.columns else None
+
+    if mode == "signals":
+        sensors = [sensor] if sensor else None
+        fig = plot_recording_comparison(healthy[0], df, sensors=sensors, x_col=x_col)
+        shown = sensor or ", ".join(s for s in sensor_columns(df) if s in healthy[0].columns)
+        return {
+            "x_col": x_col,
+            "y_col": shown,
+            "comparison": mode,
+            "plot_json": figure_to_json(fig),
+            "explanation": (
+                f"The chart is a line chart over time, one panel per sensor ({shown}): the healthy "
+                "reference recording (blue) against the uploaded recording (orange), both shifted "
+                "to start at t = 0. Values are in unknown units."
+            ),
+        }
+
+    baseline = build_healthy_baseline(healthy)
+    deviations = rank_deviations(df, baseline)
+    if mode == "heatmap":
+        fig = plot_deviation_heatmap(deviations)
+    else:
+        fig = plot_feature_deviation(deviations, top_n=COMPARISON_TOP_N, sensor=sensor)
+
+    from analysis.charts import _prepare_deviations
+
+    tidy = _prepare_deviations(deviations, sensor)
+    outside = tidy[tidy["abs_z"] > Z_LIMIT]
+    flagged = [
+        f"{r.sensor} {r.feature} {r.z_score:+.1f} sigma "
+        f"(uploaded {r.test_mean:.4g}, healthy {r.healthy_mean:.4g})"
+        for r in outside.head(10).itertuples()
+    ]
+    closest = tidy[tidy["abs_z"] <= Z_LIMIT].head(3)
+    near = [f"{r.sensor} {r.feature} {r.z_score:+.1f} sigma" for r in closest.itertuples()]
+    if flagged:
+        verdict = (
+            f"Outside the healthy range ({len(outside)} of {len(tidy)} features): "
+            f"{'; '.join(flagged)}."
+            + (f" Every other feature is inside it (closest: {'; '.join(near)})." if near else "")
+        )
+    else:
+        verdict = f"No feature is outside the healthy range (closest: {'; '.join(near)})."
+    if mode == "heatmap":
+        how = (
+            "The chart is a heatmap: one row per sensor, one column per feature, each cell "
+            "the deviation from the healthy mean in standard deviations (orange above, blue "
+            "below, near white = close to healthy)."
+        )
+    else:
+        how = (
+            "The chart is a horizontal bar chart: one bar per feature, longest deviation on top; "
+            "bar length is the deviation from the healthy mean in standard deviations (log "
+            f"scale); orange bars are outside the healthy range (more than {Z_LIMIT:g} sigma), "
+            "blue bars are inside it."
+        )
+    return {
+        "x_col": x_col,
+        "y_col": sensor or y_col,
+        "comparison": mode,
+        "plot_json": figure_to_json(fig),
+        "explanation": f"{how} {verdict} Values are in unknown units.",
+    }
+
+
 def handle_chart_data(
     arguments: Dict[str, Any],
     df: Optional[pd.DataFrame] = None,
@@ -938,6 +1043,18 @@ def handle_chart_data(
     if df is not None:
         resolved_x = _resolve_x_column(df, x_col)
         if resolved_x in df.columns and y_col in df.columns:
+            mode = arguments.get("comparison")
+            if mode in COMPARISON_MODES:
+                try:
+                    return _comparison_chart(df, resolved_x, y_col, mode)
+                except Exception as exc:
+                    logger.warning("Comparison chart (%s) failed: %s", mode, exc)
+                    return {
+                        "x_col": resolved_x,
+                        "y_col": y_col,
+                        "plot_json": "{}",
+                        "explanation": f"The healthy comparison chart could not be built: {exc}",
+                    }
             if y_col == resolved_x and resolved_x == "Relative_Time_Sec":
                 # Query named no sensor (dispatcher picked the time column): plot all sensors.
                 try:
@@ -1269,6 +1386,15 @@ registry.register(ToolDefinition(
             "sensor_id": {
                 "type": "string",
                 "description": "Optional sensor_id filter used with show_anomalies.",
+            },
+            "comparison": {
+                "type": "string",
+                "enum": ["signals", "features", "heatmap"],
+                "description": (
+                    "Compare the uploaded recording with the healthy reference: 'signals' "
+                    "(overlay), 'features' (feature deviations vs the healthy range) or "
+                    "'heatmap' (sensor x feature)."
+                ),
             },
         },
         "required": ["y_col"],

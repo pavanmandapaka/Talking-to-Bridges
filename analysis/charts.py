@@ -6,14 +6,20 @@ code works in the Streamlit dashboard AND inside the backend `chart_data` tool
 """
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Iterable, Sequence
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 DEFAULT_X = "Relative_Time_Sec"
 MAX_POINTS = 5000  # keep browser charts fast on 30k+ sample recordings
 UNITS_NOTE = "units not yet known"
+HEALTHY_COLOR = "#2a78d6"  # blue: healthy reference
+TEST_COLOR = "#eb6834"  # orange: uploaded / assessed recording
+Z_LIMIT = 3.0  # |z| above this is outside the healthy range
 
 
 def sensor_columns(df: pd.DataFrame) -> list[str]:
@@ -158,6 +164,180 @@ def plot_anomaly_chart(
         title=f"Anomalies: {sensor_col} ({detail}, {UNITS_NOTE})",
         xaxis_title="Relative time (s)" if x_col == DEFAULT_X else str(x_col),
         yaxis_title="Sensor value", hovermode="x unified",
+    )
+    return fig
+
+
+def _rebased(df: pd.DataFrame, x_col: str) -> pd.Series:
+    """x values shifted so every recording starts at 0 (recordings start at different times)."""
+    x = pd.to_numeric(df[x_col], errors="coerce")
+    return x - x.iloc[0]
+
+
+def plot_recording_comparison(
+    healthy_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    sensors: Sequence[str] | None = None,
+    x_col: str = DEFAULT_X,
+    max_points: int = MAX_POINTS,
+) -> go.Figure:
+    """Healthy recording (blue) overlaid on the uploaded recording (orange), one panel per sensor.
+
+    Both recordings are shifted to start at t = 0 so they can be compared directly.
+    Raises ValueError on bad input.
+    """
+    for name, frame in (("healthy", healthy_df), ("uploaded", test_df)):
+        if frame is None or frame.empty:
+            raise ValueError(f"The {name} recording is empty.")
+    shared = [c for c in sensor_columns(test_df) if c in healthy_df.columns]
+    sensors = [s for s in (sensors or shared) if s in shared]
+    if not sensors:
+        raise ValueError("No sensor columns are present in both recordings.")
+    _check(healthy_df, x_col, sensors)
+    _check(test_df, x_col, sensors)
+    h, t = downsample(healthy_df, max_points), downsample(test_df, max_points)
+    hx, tx = _rebased(h, x_col).tolist(), _rebased(t, x_col).tolist()
+
+    fig = make_subplots(
+        rows=len(sensors), cols=1, shared_xaxes=True, vertical_spacing=0.04,
+        subplot_titles=[str(s) for s in sensors],
+    )
+    for i, col in enumerate(sensors, start=1):
+        fig.add_trace(
+            go.Scattergl(
+                x=hx, y=h[col].tolist(), mode="lines", name="Healthy",
+                line={"width": 1, "color": HEALTHY_COLOR}, legendgroup="healthy",
+                showlegend=i == 1,
+            ),
+            row=i, col=1,
+        )
+        fig.add_trace(
+            go.Scattergl(
+                x=tx, y=t[col].tolist(), mode="lines", name="Uploaded",
+                line={"width": 1, "color": TEST_COLOR}, legendgroup="test",
+                showlegend=i == 1,
+            ),
+            row=i, col=1,
+        )
+    fig.update_layout(
+        title=f"Healthy vs uploaded recording ({UNITS_NOTE})",
+        height=max(360, 230 * len(sensors) + 90),
+        hovermode="x unified",
+        legend={"orientation": "h", "y": 1.0, "yanchor": "bottom", "x": 1.0, "xanchor": "right"},
+    )
+    fig.update_xaxes(title_text="Relative time (s)", row=len(sensors), col=1)
+    fig.update_yaxes(title_text="Sensor value")
+    return fig
+
+
+def _split_feature(row) -> tuple[str, str]:
+    """('Sensor_3', 'kurtosis') from a deviation row.
+
+    Accepts rows where the feature is already split and rows where the full name
+    ('Sensor_1_fft_peak_freq') ended up in the sensor/feature columns.
+    """
+    feature = str(row["feature"])
+    sensor = str(row["sensor"])
+    full = feature if feature.startswith("Sensor_") else f"{sensor}_{feature}"
+    match = re.match(r"^(Sensor_\d+)_(.+)$", full)
+    return (match.group(1), match.group(2)) if match else (sensor, feature)
+
+
+def _prepare_deviations(deviations: pd.DataFrame, sensor: str | None = None) -> pd.DataFrame:
+    """Tidy copy of rank_deviations() output: clean sensor/feature names, optional sensor filter."""
+    if deviations is None or deviations.empty:
+        raise ValueError("No feature deviations to chart.")
+    needed = {"sensor", "feature", "healthy_mean", "test_mean", "z_score"}
+    missing = needed - set(deviations.columns)
+    if missing:
+        raise ValueError(f"Deviation table is missing column(s): {', '.join(sorted(missing))}")
+    out = deviations.copy()
+    parts = out.apply(_split_feature, axis=1)
+    out["sensor"] = [p[0] for p in parts]
+    out["feature"] = [p[1] for p in parts]
+    out["abs_z"] = out["z_score"].abs()
+    if sensor:
+        out = out[out["sensor"] == sensor]
+        if out.empty:
+            raise ValueError(f"No feature deviations for {sensor}.")
+    return out.sort_values("abs_z", ascending=False).reset_index(drop=True)
+
+
+def plot_feature_deviation(
+    deviations: pd.DataFrame,
+    top_n: int = 12,
+    z_limit: float = Z_LIMIT,
+    sensor: str | None = None,
+) -> go.Figure:
+    """Feature values against the healthy range.
+
+    `deviations` is the table from `analysis.features.rank_deviations`. Each bar is how
+    many healthy standard deviations a feature of the uploaded recording is from its
+    healthy mean (|z|, log axis because damage can be hundreds of sigmas). The dashed
+    line is the edge of the healthy range (`z_limit` sigma): bars to its right are
+    outside the healthy range. Hover shows the healthy and uploaded values.
+    """
+    dev = _prepare_deviations(deviations, sensor).head(top_n).iloc[::-1]  # biggest on top
+    labels = [f"{r.sensor} {r.feature}" for r in dev.itertuples()]
+    outside = dev["abs_z"] > z_limit
+    fig = go.Figure(
+        go.Bar(
+            x=dev["abs_z"].clip(lower=0.01).tolist(),
+            y=labels,
+            orientation="h",
+            marker={"color": [TEST_COLOR if o else HEALTHY_COLOR for o in outside]},
+            text=[f"{z:+.1f}\u03c3" for z in dev["z_score"]],
+            textposition="outside",
+            customdata=list(zip(dev["healthy_mean"], dev["test_mean"], dev["z_score"])),
+            hovertemplate=(
+                "%{y}<br>healthy mean %{customdata[0]:.4g}<br>uploaded mean %{customdata[1]:.4g}"
+                "<br>deviation %{customdata[2]:+.2f}\u03c3<extra></extra>"
+            ),
+            showlegend=False,
+        )
+    )
+    x_min = min(0.3, float(dev["abs_z"].min()) * 0.8, z_limit / 3)
+    x_max = max(float(dev["abs_z"].max()), z_limit) * 4  # room for the value labels
+    fig.add_vrect(x0=x_min, x1=z_limit, fillcolor=HEALTHY_COLOR, opacity=0.12, line_width=0, layer="below")
+    fig.add_vline(x=z_limit, line_dash="dash", line_color="#333333", line_width=2)
+    n_out = int((_prepare_deviations(deviations, sensor)["abs_z"] > z_limit).sum())
+    scope = f" for {sensor}" if sensor else ""
+    fig.update_layout(
+        title=f"Features vs healthy range{scope}: {n_out} outside the range ({UNITS_NOTE})",
+        xaxis={
+            "type": "log",
+            "range": [math.log10(x_min), math.log10(x_max)],
+            "title": (
+                "Deviation from healthy mean (standard deviations, log scale); "
+                f"shaded area and dashed line = healthy range (up to {z_limit:g}\u03c3)"
+            ),
+        },
+        yaxis={"automargin": True},
+        height=max(320, 34 * len(dev) + 150),
+        margin={"r": 60},
+    )
+    return fig
+
+
+def plot_deviation_heatmap(deviations: pd.DataFrame, z_clip: float = 10.0) -> go.Figure:
+    """Sensor x feature grid of deviations from healthy (signed z; colour clipped at +/- z_clip)."""
+    dev = _prepare_deviations(deviations)
+    grid = dev.pivot_table(index="sensor", columns="feature", values="z_score", aggfunc="first")
+    grid = grid.sort_index()
+    fig = go.Figure(
+        go.Heatmap(
+            z=grid.values.tolist(), x=list(grid.columns), y=list(grid.index),
+            zmin=-z_clip, zmax=z_clip, zmid=0,
+            colorscale=[[0, HEALTHY_COLOR], [0.5, "#f2f2f0"], [1, TEST_COLOR]],
+            text=[[f"{v:+.0f}" if abs(v) >= 100 else f"{v:+.1f}" for v in row] for row in grid.values.tolist()],
+            texttemplate="%{text}", colorbar={"title": "z (sigma)"},
+            hovertemplate="%{y} %{x}<br>%{z:+.2f}\u03c3 from healthy<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=f"Deviation from healthy by sensor and feature ({UNITS_NOTE})",
+        yaxis={"autorange": "reversed"},
+        height=max(300, 70 * len(grid.index) + 150),
     )
     return fig
 

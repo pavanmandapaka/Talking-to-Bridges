@@ -20,7 +20,7 @@ Design rules
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -308,6 +308,13 @@ class ChartDataInput(BaseModel):
     sensor_id: Optional[str] = Field(
         default=None,
         description="Optional sensor_id filter used when show_anomalies is true.",
+    )
+    comparison: Optional[Literal["signals", "features", "heatmap"]] = Field(
+        default=None,
+        description=(
+            "Compare the uploaded recording with the healthy reference: 'signals' (overlay), "
+            "'features' (feature deviations vs the healthy range) or 'heatmap' (sensor x feature)."
+        ),
     )
 
 
