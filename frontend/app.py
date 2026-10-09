@@ -166,7 +166,7 @@ with st.sidebar:
 
             if doc.get("preview_df") is not None:
                 with st.expander("CSV Data Preview (first 10 rows)", expanded=True):
-                    st.dataframe(doc["preview_df"], use_container_width=True)
+                    st.dataframe(doc["preview_df"], width='stretch')
                 
         else:
             # PDF / DOCX / TXT display
@@ -190,7 +190,7 @@ for msg_idx, msg in enumerate(st.session_state.messages):
                         st.caption(src.get("text"))
 
         if "fig" in msg:
-            st.plotly_chart(msg["fig"], use_container_width=True, key=f"chat_fig_{msg_idx}")
+            st.plotly_chart(msg["fig"], width='stretch', key=f"chat_fig_{msg_idx}")
         if "audio" in msg:
             st.audio(msg["audio"], format=msg.get("content_type", "audio/wav"))
 
@@ -298,7 +298,7 @@ if user_query:
                     fig = pio.from_json(fig_json)
                     st.plotly_chart(
                         fig,
-                        use_container_width=True,
+                        width='stretch',
                         key=f"chat_fig_new_{len(st.session_state.messages)}",
                     )
 

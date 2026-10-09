@@ -162,7 +162,7 @@ def render_data_audit() -> None:
     else:
         cond_counts = ok_df["condition"].value_counts(dropna=False).reset_index()
         cond_counts.columns = ["Condition", "File Count"]
-        st.dataframe(cond_counts, use_container_width=False)
+        st.dataframe(cond_counts, width='content')
 
     # ===================================================================
     # AUDIT SECTION 2 – Damage level & specimen cross-table
@@ -175,7 +175,7 @@ def render_data_audit() -> None:
             .size()
             .reset_index(name="File Count")
         )
-        st.dataframe(cross, use_container_width=True)
+        st.dataframe(cross, width='stretch')
     else:
         st.info("No specimen metadata found. Make sure the file paths contain "
                 "folder names like '1mm', 'M1', 'M2', etc.")
@@ -191,7 +191,7 @@ def render_data_audit() -> None:
             .reset_index()
         )
         rate_counts.columns = ["Sampling Rate (Hz)", "File Count"]
-        st.dataframe(rate_counts, use_container_width=False)
+        st.dataframe(rate_counts, width='content')
 
         n_rates = ok_df["sampling_rate_hz"].nunique(dropna=True)
         if n_rates == 1:
@@ -217,7 +217,7 @@ def render_data_audit() -> None:
         st.warning(f"{len(bad_df)} file(s) were not fully processed:")
         st.dataframe(
             bad_df[["source_file", "status", "message"]].reset_index(drop=True),
-            use_container_width=True,
+            width='stretch',
         )
 
     # ===================================================================

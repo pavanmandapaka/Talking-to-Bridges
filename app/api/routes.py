@@ -398,7 +398,7 @@ async def chat(request: ChatRequest):
         # ------------------------------------------------------------------
         retrieved_chunks = []
         try:
-            semantic_results = retriever.retrieve(clean_message, top_k=3)
+            semantic_results = retriever.retrieve(clean_message, top_k=1)
             if semantic_results:
                 retrieved_chunks = [
                     RetrievalResult(

@@ -64,7 +64,7 @@ class GroqLLMService:
                 if response.status_code == 401:
                     raise GroqUnavailableError("Groq API key is invalid")
                 if response.status_code != 200:
-                    raise GrokServiceError(
+                    raise GroqServiceError(
                         f"Groq model listing failed with status {response.status_code}"
                     )
                 return [
@@ -82,10 +82,11 @@ class GroqLLMService:
             logger.error(f"Groq model listing request failed: {error}")
             raise GroqServiceError("Failed to list Groq models")
 
-    async def generate(self, messages: list[dict[str, str]]) -> str:
+    async def generate(self, messages: "str | list[dict[str, str]]") -> str:
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
         """Generate a response from the configured Groq model."""
         import asyncio
-        import httpx
         if not self.api_key:
             raise GroqUnavailableError("Groq API key is not configured")
 
@@ -93,10 +94,7 @@ class GroqLLMService:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 1024,
         }
-        import json
-        logger.warning(f"Payload size: {len(json.dumps(messages))} chars")
         
         max_retries = 3
         for attempt in range(max_retries):
@@ -122,7 +120,7 @@ class GroqLLMService:
                     if response.status_code == 404:
                         raise GroqModelNotFoundError(f"Model '{self.model}' was not found.")
                     if response.status_code != 200:
-                        raise GroqServiceError(f"Groq API error status: {response.status_code} - {response.text}")
+                        raise GroqServiceError(f"Groq API error status: {response.status_code}")
 
                     choices = response.json().get("choices", [])
                     if not choices or not choices[0].get("message", {}).get("content"):
