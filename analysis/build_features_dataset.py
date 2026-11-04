@@ -88,6 +88,8 @@ def process_recording_file(file_path: Path) -> Dict[str, Any]:
         "f1_hz": feats.get("f1_hz", 0.0),
         "f2_hz": feats.get("f2_hz", 0.0),
         "f3_hz": feats.get("f3_hz", 0.0),
+        "f2_over_f1": feats.get("f2_over_f1", 0.0),
+        "f3_over_f1": feats.get("f3_over_f1", 0.0),
     }
 
     # Add all per-sensor statistical features
@@ -109,13 +111,13 @@ def build_healthy_baseline_profile(
         logger.warning("No undamaged recordings found to build baseline.")
         return {}
 
-    feature_cols = [
-        c for c in undamaged_df.columns
-        if c not in {
-            "recording_id", "case_id", "source_file", "specimen",
-            "test_type", "sampling_rate_hz", "condition", "damage_level_mm"
-        }
-    ]
+    disallowed = {
+        "recording_id", "case_id", "source_file", "specimen",
+        "test_type", "sampling_rate_hz", "condition", "damage_level_mm",
+        "duration_sec", "sample_count",
+    }
+    feature_cols = [c for c in undamaged_df.columns if c not in disallowed]
+    assert not any(c in disallowed for c in feature_cols), "Metadata or label column found in feature list!"
 
     profile: Dict[str, Any] = {
         "n_healthy_recordings": int(len(undamaged_df)),

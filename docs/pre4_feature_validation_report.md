@@ -1,97 +1,84 @@
-# PRE-4: Feature Extraction and Preprocessing Validation Report
+# PRE-4: Feature Extraction and Preprocessing Validation Report (Revised)
 
 **Project:** Talking to Bridges  
 **Author:** Eswar  
 **Tasks:** PRE-2 (Frequency-analysis preparation) & PRE-4 (Preprocessing validation and dataset handoff)  
 **Authoritative Plan Reference:** `Talking_to_Bridges_Revised_Plan_v2.pdf`  
 **Date:** November 2026  
-**Status:** Complete & Approved for Handoff (TRN-1 & NEW-2)
+**Status:** Complete & Approved for Handoff (Varshneya TRN-1, Nagarjun NEW-2 & NEW-3)
 
 ---
 
-## Executive Summary
+## 1. Executive Summary & Critical Sampling-Rate Correction
 
-As part of **Tasks PRE-2 and PRE-4**, the feature extraction engine (`analysis/features.py`) was completely overhauled to resolve the sampling rate discrepancy, eliminate arbitrary 1-second windowing, and implement high-resolution whole-signal FFT modal analysis.
+During the initial PRE-1 and PRE-2 analysis, an empirical discrepancy was observed in the raw export time steps:
+- **Damaged recordings:** $\Delta t = 0.0033\text{ s} \implies \approx 303.03\text{ Hz}$
+- **Undamaged recordings:** $\Delta t = 0.0030\text{ s} \implies \approx 333.33\text{ Hz}$
 
-A full batch extraction run was executed across all **257 processed recordings** in the repository:
-- **40 Undamaged recordings** (1st and 2nd cantilever specimens)
-- **217 Damaged recordings** (1mm and 2mm crack depths across specimens M1 to M7)
+### The Root Cause: Software Rounding Artifact
+The research paper (*Katam et al., Structures 71, 2025*) specifies that experimental data acquisition was conducted at a uniform rate of **$300\text{ Hz}$** ($1/300 = 0.003333...\text{ s}$). 
+When the time deltas were rounded during software export ($0.0033\text{ s}$ in one export batch and $0.0030\text{ s}$ in another), evaluating FFT frequency axes using $1/\text{median}(\Delta t)$ artificially scaled undamaged frequencies by $333.33 / 303.03 = 1.10$ ($+10\%$). This created an artificial "zero-overlap gap" in $f_1$ that was an artifact of the time column, not structural damage.
 
-Two master deliverables were generated and verified:
-1. **`data/processed/features_dataset.csv` (Interface A)**: 257 rows $\times$ 46 columns, strictly partitioning metadata, ground-truth targets, and 38 physical/statistical features.
-2. **`data/reference/healthy_baseline.json` (Interface B foundation)**: A healthy baseline statistical profile (median, MAD, mean, std, min, max) compiled across all 40 undamaged recordings.
-
----
-
-## 1. Natural Bending Frequencies: Healthy vs. Damaged
-
-### Empirical Modal Frequencies
-
-| Condition | Count | Mode 1 ($f_1$) Mean ± Std | Mode 1 Range [Min, Max] | Mode 2 ($f_2$) Mean ± Std | Mode 3 ($f_3$) Mean ± Std |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Undamaged (Healthy)** | 40 | $\mathbf{8.454 \pm 0.072\text{ Hz}}$ | $[8.262, 8.560\text{ Hz}]$ | $42.150 \pm 0.327\text{ Hz}$ | $138.953 \pm 5.228\text{ Hz}$ |
-| **Damaged ($1\text{ mm}$ & $2\text{ mm}$)** | 217 | $\mathbf{7.661 \pm 0.087\text{ Hz}}$ | $[7.477, 7.808\text{ Hz}]$ | $40.323 \pm 0.848\text{ Hz}$ | $124.965 \pm 8.214\text{ Hz}$ |
-
-### Key Physical Findings
-
-1. **Clean Fundamental Frequency Separation ($f_1$):**
-   * The **lowest** undamaged frequency is **$8.262\text{ Hz}$**.
-   * The **highest** damaged frequency is **$7.808\text{ Hz}$**.
-   * There is a **gap of $0.454\text{ Hz}$** between the healthy cluster and the damaged cluster with **zero overlap**. This guarantees strong separation for Varshneya's binary classification model (**Model A**).
-2. **Modal Drop Statistics:**
-   * Average fundamental bending frequency drop:
-     $$\Delta f_1 = \frac{7.661 - 8.454}{8.454} \times 100\% = \mathbf{-9.38\%}$$
-   * Average second bending frequency drop:
-     $$\Delta f_2 = \frac{40.323 - 42.150}{42.150} \times 100\% = \mathbf{-4.33\%}$$
-3. **Missing / Unresolved Peaks:**
-   * **0 recordings** failed peak extraction. All 257 files produced clear, distinct resonant peaks within the expected physical modal search bands.
+### The Engineering Fix:
+1. **Nominal Sampling Rate (`NOMINAL_FS_HZ = 300.0`):** All spectral analyses (`compute_spectrum`, `extract_modal_frequencies`, and `extract_features`) now evaluate at the authoritative physical rate of **$300.0\text{ Hz}$**.
+2. **Metadata Isolation:** `calculate_sampling_rate()` is preserved for reporting only, stored as metadata (`sampling_rate_hz`), and strictly excluded from model feature sets.
+3. **Rate-Independent Modal Ratios:** Added invariant modal ratios `f2_over_f1` ($f_2 / f_1$) and `f3_over_f1` ($f_3 / f_1$), which remain stable regardless of time-axis scaling.
 
 ---
 
-## 2. Repeatability Across Repeated Tests of the Same Case
+## 2. Corrected Modal Frequencies & Ratios (300 Hz Calibration)
 
-In accordance with the PRE-4 specification, modal frequency stability was evaluated across multiple experimental hit types (Displacement, Singlehit, Multihit, Randomhit) for each distinct physical specimen/case:
+Evaluating recordings at the nominal $300\text{ Hz}$ physical rate aligns the healthy frequencies directly with the published experimental benchmarks:
 
-| Case ID (`case_id`) | Description | Recordings ($N$) | Mean $f_1$ (Hz) | Std $f_1$ (Hz) | CV% ($f_1$) |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| `Undamaged_1st` | Healthy 1st Cantilever | 20 | 8.448 | 0.082 | 0.97% |
-| `Undamaged_2nd` | Healthy 2nd Cantilever | 20 | 8.460 | 0.061 | 0.72% |
-| `1mm_M1` | 1mm crack, Location M1 | 20 | 7.712 | 0.038 | 0.49% |
-| `1mm_M2` | 1mm crack, Location M2 | 20 | 7.698 | 0.031 | 0.40% |
-| `1mm_M3` | 1mm crack, Location M3 | 20 | 7.674 | 0.029 | 0.38% |
-| `1mm_M4` | 1mm crack, Location M4 | 20 | 7.652 | 0.041 | 0.54% |
-| `1mm_M5` | 1mm crack, Location M5 | 20 | 7.689 | 0.035 | 0.46% |
-| `1mm_M6` | 1mm crack, Location M6 | 20 | 7.721 | 0.044 | 0.57% |
-| `1mm_M7` | 1mm crack, Location M7 | 20 | 7.705 | 0.039 | 0.51% |
-| `2mm_M1` | 2mm crack, Location M1 | 20 | 7.534 | 0.030 | 0.40% |
-| `2mm_M2` | 2mm crack, Location M2 | 20 | 7.518 | 0.027 | 0.36% |
-| `2mm_M3` | 2mm crack, Location M3 | 19 | 7.525 | 0.032 | 0.43% |
-| `2mm_M4` | 2mm crack, Location M4 | 18 | 7.549 | 0.036 | 0.48% |
+| Parameter | Paper Benchmark (Healthy) | Undamaged Measured ($N=40$) | Damaged $1\text{ mm}$ ($N=140$) | Damaged $2\text{ mm}$ ($N=77$) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Mode 1 ($f_1$)** | $\approx 7.69\text{ Hz}$ | $\mathbf{7.609 \pm 0.064\text{ Hz}}$ | $7.634 \pm 0.044\text{ Hz}$ | $\mathbf{7.495 \pm 0.069\text{ Hz}}$ |
+| **Mode 2 ($f_2$)** | $\approx 37.79\text{ Hz}$ | $\mathbf{37.935 \pm 0.291\text{ Hz}}$ | $39.708 \pm 0.778\text{ Hz}$ | $\mathbf{40.316 \pm 0.877\text{ Hz}}$ |
+| **Ratio ($f_2 / f_1$)** | $\approx 4.91$ | $\mathbf{4.986 \pm 0.060}$ | $\mathbf{5.202 \pm 0.105}$ | $\mathbf{5.380 \pm 0.121}$ |
 
-> **Repeatability Takeaway:**  
-> The coefficient of variation ($\text{CV}\%$) within any given physical case is **below $1.0\%$**, confirming that natural frequencies are intrinsic physical properties of the structure and remain stable across different excitation mechanisms.
+### Key Observations:
+1. **Benchmark Alignment:** Healthy $f_1$ ($7.609\text{ Hz}$) and $f_2$ ($37.935\text{ Hz}$) now closely match the paper’s experimental values ($7.69\text{ Hz}$ and $37.79\text{ Hz}$).
+2. **Frequency Overlap & Location Dependence:** $f_1$ alone does **not** separate healthy from damaged with zero overlap: for minor $1\text{ mm}$ cracks located near the free end (e.g. M6/M7), the first bending mode curvature is minimal and $f_1$ remains close to $\approx 7.6\text{ Hz}$.
+3. **The Invariant Ratio ($f_2 / f_1$):** While individual frequencies shift subtly, the modal ratio $f_2 / f_1$ exhibits a progressive, monotonic shift with damage:
+   * Healthy: $4.986 \pm 0.060$ (Range: $4.89 - 5.09$)
+   * Damaged 1mm: $5.202 \pm 0.105$ (Range: $5.12 - 6.05$)
+   * Damaged 2mm: $5.380 \pm 0.121$ (Range: $5.15 - 5.55$)
+   This ratio provides a rate-independent feature for classification and quantification.
 
 ---
 
-## 3. Interface A Schema Definition (`features_dataset.csv`)
+## 3. Dataset Scope & Case Distribution
 
-The dataset conforms strictly to Interface A defined in Section 5 of the Revised Plan:
+The full laboratory dataset comprises **460 dynamic recordings** across **23 physical cases**:
+* **40 Undamaged recordings** across 2 baseline cantilever setups (`Undamaged_1st`, `Undamaged_2nd`).
+* **420 Damaged recordings** across 21 damaged cases:
+  * 3 crack depths: $1\text{ mm}$, $2\text{ mm}$, $3\text{ mm}$
+  * 7 specimen locations: `M1` through `M7` ($3 \times 7 = 21$ cases)
 
-### Group 1: Metadata (Excluded from ML Training)
+*(Note: The local development machine currently holds a 257-recording subset of 1mm and 2mm data; Varshneya's machine holds the full 460-recording dataset including all 3mm and M5–M7 tests. Varshneya will run `build_features_dataset.py` on the complete 460-file repository upon pulling this fix).*
+
+---
+
+## 4. Interface A Schema Definition
+
+The feature table generated by `extract_features()` strictly separates metadata from training features:
+
+### A. Metadata (Excluded from Model Input Features)
 - `recording_id` (str): Unique file stem.
-- `case_id` (str): Group identifier for Leave-One-Case-Out cross-validation.
-- `source_file` (str): Relative path to source recording.
-- `specimen` (str): Beam/cut condition identifier.
+- `case_id` (str): Group identifier for Leave-One-Case-Out cross-validation (e.g. `1mm_M1`, `2mm_M3`, `Undamaged_1st`).
+- `source_file` (str): Original file path.
+- `specimen` (str): Specimen tag (`M1`–`M7`, `1st`, `2nd`).
 - `test_type` (str): Excitation method (`Displacement`, `Singlehit`, `Multihit`, `Randomhit`).
-- `sampling_rate_hz` (float): Dynamic sampling rate ($303.03\text{ Hz}$ or $333.33\text{ Hz}$). Strictly excluded from model inputs to prevent data leakage.
+- `sampling_rate_hz` (float): Measured empirical export rate ($\approx 303.03$ or $\approx 333.33\text{ Hz}$). Strictly excluded from model training.
 
-### Group 2: Labels (Training Targets Only)
+### B. Labels (Training Targets Only)
 - `condition` (str): `Damaged` vs `Undamaged`.
-- `damage_level_mm` (float): `1.0`, `2.0`, or `NaN` (for Undamaged).
+- `damage_level_mm` (float): `1.0`, `2.0`, `3.0` (or `NaN` for Undamaged).
 
-### Group 3: Model Input Features (38 Features)
-- Modal Frequencies: `f1_hz`, `f2_hz`, `f3_hz`
-- Per-Sensor Time Domain Metrics (for `Sensor_1` to `Sensor_5`):
+### C. Input Features (40 Features)
+- Natural Frequencies: `f1_hz`, `f2_hz`, `f3_hz` (evaluated at $300\text{ Hz}$)
+- Modal Ratios: `f2_over_f1`, `f3_over_f1`
+- Per-Sensor Time Domain Metrics (`Sensor_1` to `Sensor_5`):
   - RMS: `Sensor_{i}_rms`
   - Kurtosis: `Sensor_{i}_kurtosis`
   - Skewness: `Sensor_{i}_skewness`
@@ -102,11 +89,25 @@ The dataset conforms strictly to Interface A defined in Section 5 of the Revised
 
 ---
 
-## 4. Preprocessing Sign-Off & Handoff
+## 5. Verification & Unit Tests
 
-* **For Varshneya (Task TRN-1):**  
-  The feature dataset `data/processed/features_dataset.csv` is validated and ready for model training. Group splits should be conducted using the `case_id` column to perform strict Leave-One-Case-Out evaluation across the 13 physical cases.
-* **For Nagarjun (Tasks NEW-2 & NEW-3):**  
-  The healthy baseline profile `data/reference/healthy_baseline.json` is generated with robust median and MAD parameters. Two representative healthy recordings (`healthy_reference_1st_disp1cm.csv` and `healthy_reference_2nd_disp1cm.csv`) have been placed in `data/reference/` for the spectrum overlay charts.
+The test suite in `tests/test_features.py` was updated with 8 comprehensive tests (**all 8 passed**):
+1. `test_calculate_sampling_rate`: Validates that empirical rates ($303.03\text{ Hz}$ and $333.33\text{ Hz}$) are correctly audited.
+2. `test_sampling_rate_rounding_invariance`: Proves that a synthetic test signal written with $\Delta t = 0.0030\text{ s}$ vs $\Delta t = 0.0033\text{ s}$ yields identical modal frequencies ($\le 0.05\text{ Hz}$ difference) and identical modal ratios under the $300\text{ Hz}$ nominal framework.
+3. `test_ratio_features_and_no_metadata_in_features`: Confirms that `f2_over_f1` and `f3_over_f1` exist and asserts that no metadata or label column leaks into feature matrices.
+4. `test_compute_spectrum`: Validates FFT frequency and amplitude tracking.
+5. `test_extract_modal_frequencies_synthetic`: Validates peak-picking within bounded search bands.
+6. `test_extract_features_interface_a`: Validates complete Interface A output.
+7. `test_backward_compatibility_extract_window_features`: Confirms backward compatibility.
+8. `test_build_healthy_baseline_and_rank_deviations`: Confirms baseline building and deviation ranking.
+
+---
+
+## 6. Preprocessing Sign-Off & Handoff
+
+* **For Varshneya (TRN-1):**  
+  Pull this commit and execute `python analysis/build_features_dataset.py` on your machine across the full 460 files. Train Model A and Model B using `case_id` for grouped Leave-One-Case-Out cross-validation. Ensure `f2_over_f1` and `f3_over_f1` are included as model inputs.
+* **For Nagarjun (NEW-2 & NEW-3):**  
+  The healthy baseline profile at `data/reference/healthy_baseline.json` has been updated with the corrected $300\text{ Hz}$ features and ratios. `compute_spectrum(df, sensor)` in `analysis/features.py` is ready for the spectrum overlay charts.
 
 **Signed off by:** Eswar (November 2026)

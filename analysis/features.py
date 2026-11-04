@@ -5,19 +5,22 @@ Task: PRE-2 (Frequency-analysis preparation)
 Authoritative Reference: Talking to Bridges Revised Plan v2 (November 2026)
 
 Key Responsibilities:
-1. Dynamic Sampling Rate: Calculate fs = 1 / median(diff(Relative_Time_Sec)) per recording
-   rather than assuming a static 300 Hz or 303 Hz.
-2. Whole-Recording FFT: Perform spectral analysis over the entire free-vibration duration
-   to achieve fine sub-Hertz resolution (delta_f <= 0.05 Hz), resolving 0.1-0.7 Hz modal shifts.
-3. Natural Bending Frequencies: Extract the first three bending modal frequencies
-   (f1_hz, f2_hz, f3_hz) using physically bounded peak-picking.
-4. Interface A Compliance:
-   - extract_features(df) -> Dict[str, Any] (one feature row per recording)
-   - compute_spectrum(df, sensor) -> Tuple[np.ndarray, np.ndarray] (for NEW-3 charts)
-5. Time-Domain Amplitude & Energy Metrics: Per-sensor RMS, kurtosis, skewness, variance,
-   crest factor, and peak-to-peak.
-6. Backward Compatibility: Maintain updated implementations of extract_window_features,
-   build_healthy_baseline, and rank_deviations.
+1. Nominal Sampling Rate (NOMINAL_FS_HZ = 300.0): In accordance with Katam et al.,
+   Structures 71 (2025), experimental data acquisition was conducted at 300 Hz.
+   Observed deltas (0.0033 s vs 0.0030 s) are software export rounding artifacts.
+   Spectral frequency calculations (compute_spectrum, extract_modal_frequencies,
+   extract_features) uniformly evaluate at NOMINAL_FS_HZ = 300.0 Hz by default.
+2. Dynamic Sampling Rate for Reporting: calculate_sampling_rate() measures the nominal/
+   empirical interval (303.03 Hz vs 333.33 Hz) and records it as metadata (sampling_rate_hz).
+   It is strictly excluded from model feature sets.
+3. Whole-Recording FFT: High spectral resolution (delta_f <= 0.05 Hz) over full signal length.
+4. Natural Bending Frequencies & Invariant Ratios:
+   - f1_hz, f2_hz, f3_hz
+   - f2_over_f1 (f2_hz / f1_hz) and f3_over_f1 (f3_hz / f1_hz)
+5. Time-Domain Amplitude & Energy Metrics: Per-sensor RMS, variance, skewness, kurtosis,
+   peak, crest factor, and peak-to-peak.
+6. Backward Compatibility: Preserves extract_window_features, build_healthy_baseline,
+   and rank_deviations.
 """
 
 from __future__ import annotations
@@ -32,12 +35,29 @@ from scipy.fft import rfft, rfftfreq
 
 logger = logging.getLogger("ttb.analysis.features")
 
-# Standard sensor column names in order from clamp (Sensor_1) to tip (Sensor_5)
+# Constant nominal sampling rate cited in Katam et al., Structures 71 (2025).
+# Can be overridden via function parameter if required by faculty confirmation.
+NOMINAL_FS_HZ: float = 300.0
+
+# Standard sensor column names from clamp (Sensor_1) to tip (Sensor_5)
 SENSOR_COLS: List[str] = ["Sensor_1", "Sensor_2", "Sensor_3", "Sensor_4", "Sensor_5"]
 
+# Metadata and label columns that must NEVER be used as model input features
+NON_FEATURE_COLS: set[str] = {
+    "recording_id",
+    "case_id",
+    "source_file",
+    "specimen",
+    "test_type",
+    "sampling_rate_hz",
+    "condition",
+    "damage_level_mm",
+    "duration_sec",
+    "sample_count",
+}
+
 # Search bands for the first three transverse bending natural frequencies (Hz).
-# Healthy cantilever benchmarks from Katam et al., Structures 71 (2025):
-# Mode 1 ~ 7.69 Hz, Mode 2 ~ 37.79 Hz, Mode 3 ~ 134.80 Hz.
+# Healthy cantilever benchmarks at 300 Hz: Mode 1 ~ 7.69 Hz, Mode 2 ~ 37.79 Hz, Mode 3 ~ 134.80 Hz.
 DEFAULT_MODAL_BANDS: Dict[str, Tuple[float, float]] = {
     "f1_hz": (5.5, 10.0),
     "f2_hz": (32.0, 46.0),
@@ -46,18 +66,18 @@ DEFAULT_MODAL_BANDS: Dict[str, Tuple[float, float]] = {
 
 
 # ---------------------------------------------------------------------------
-# 1. Dynamic Sampling Rate
+# 1. Measured Sampling Rate (Metadata / Reporting Only)
 # ---------------------------------------------------------------------------
 
 def calculate_sampling_rate(
     df: pd.DataFrame,
-    default_fs: float = 300.0,
+    default_fs: float = NOMINAL_FS_HZ,
     time_col: Optional[str] = None,
 ) -> float:
-    """Calculate sampling rate fs = 1 / median(dt) from the recording's own time column.
+    """Calculate empirical sampling rate fs = 1 / median(dt) from the recording's time column.
 
-    Examines 'Relative_Time_Sec', 'timestamp', or a user-specified column.
-    Falls back gracefully to default_fs if no valid time delta is found.
+    Used for metadata auditing and reporting. Model frequency calculations default
+    to NOMINAL_FS_HZ (300.0 Hz) to eliminate export-rounding bias.
     """
     candidate_cols = [time_col] if time_col else ["Relative_Time_Sec", "relative_time", "timestamp", "Time"]
     target_col = next((c for c in candidate_cols if c and c in df.columns), None)
@@ -79,13 +99,13 @@ def calculate_sampling_rate(
 
 
 # ---------------------------------------------------------------------------
-# 2. Whole-Recording Spectral Analysis (Interface A Helper)
+# 2. Whole-Recording Spectral Analysis
 # ---------------------------------------------------------------------------
 
 def compute_spectrum(
     df: pd.DataFrame,
     sensor: Optional[str] = "Sensor_5",
-    fs: Optional[float] = None,
+    fs: float = NOMINAL_FS_HZ,
     detrend: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute high-resolution FFT amplitude spectrum over the whole recording.
@@ -94,18 +114,14 @@ def compute_spectrum(
         df: Cleaned recording DataFrame containing sensor columns.
         sensor: Sensor column name ('Sensor_1'..'Sensor_5'), or 'combined'
                 for sum of spectra across all available sensors.
-        fs: Sampling rate in Hz. If None, computed dynamically from df.
+        fs: Sampling rate in Hz (defaults to NOMINAL_FS_HZ = 300.0).
         detrend: Whether to subtract the DC mean component before FFT.
 
     Returns:
         (frequencies, amplitudes): Tuple of 1D numpy arrays.
     """
-    if fs is None:
-        fs = calculate_sampling_rate(df)
-
     available_sensors = [c for c in SENSOR_COLS if c in df.columns]
     if not available_sensors:
-        # Fallback to any numeric columns
         numeric_cols = list(df.select_dtypes(include=["number"]).columns)
         available_sensors = [c for c in numeric_cols if c not in {"Relative_Time_Sec", "timestamp", "DateTime"}]
 
@@ -117,7 +133,6 @@ def compute_spectrum(
     elif sensor in available_sensors:
         target_sensors = [sensor]
     else:
-        # If requested sensor missing, fallback to last sensor (tip) or first available
         target_sensors = [available_sensors[-1]]
 
     combined_amp: Optional[np.ndarray] = None
@@ -137,7 +152,6 @@ def compute_spectrum(
             combined_amp = yf
             freqs = xf
         else:
-            # Interpolate or match lengths if records vary slightly
             if len(yf) == len(combined_amp):
                 combined_amp += yf
 
@@ -154,15 +168,15 @@ def compute_spectrum(
 def extract_modal_frequencies(
     df: pd.DataFrame,
     sensor: Optional[str] = "combined",
-    fs: Optional[float] = None,
+    fs: float = NOMINAL_FS_HZ,
     bands: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Dict[str, float]:
     """Identify the first three natural bending frequencies from FFT peaks.
 
     Args:
         df: Recording DataFrame.
-        sensor: Sensor column or 'combined' (default 'combined' across all sensors).
-        fs: Sampling rate (Hz). Dynamically detected if None.
+        sensor: Sensor column or 'combined' (default 'combined').
+        fs: Sampling rate (Hz), defaults to NOMINAL_FS_HZ = 300.0.
         bands: Dictionary of search bands {mode_name: (min_hz, max_hz)}.
 
     Returns:
@@ -196,29 +210,45 @@ def extract_modal_frequencies(
 def extract_features(
     df: pd.DataFrame,
     sensor_for_spectrum: str = "combined",
+    fs: float = NOMINAL_FS_HZ,
 ) -> Dict[str, Any]:
     """Extract complete Interface A feature dictionary for a single recording.
 
     Excludes labels and metadata from model features while including:
-    - First three bending frequencies f1_hz, f2_hz, f3_hz from FFT peaks
-    - Dynamic sampling_rate_hz (metadata, not model input)
-    - Per-sensor statistical features: RMS, kurtosis, skewness, variance, peak, crest_factor, p2p
+    - First three bending frequencies f1_hz, f2_hz, f3_hz evaluated at nominal fs
+    - Rate-independent modal ratios: f2_over_f1 (f2/f1) and f3_over_f1 (f3/f1)
+    - Dynamic sampling_rate_hz (metadata only, strictly NOT a model feature)
+    - Per-sensor statistical features: RMS, variance, skewness, kurtosis, peak, crest_factor, p2p
 
     Args:
         df: Cleaned recording DataFrame.
         sensor_for_spectrum: Channel used for modal identification (default 'combined').
+        fs: FFT sampling rate (default NOMINAL_FS_HZ = 300.0).
 
     Returns:
-        Dictionary containing all features for Interface A.
+        Dictionary containing all features and metadata for Interface A.
     """
-    fs = calculate_sampling_rate(df)
+    measured_fs = calculate_sampling_rate(df, default_fs=fs)
     modal_freqs = extract_modal_frequencies(df, sensor=sensor_for_spectrum, fs=fs)
 
+    f1 = float(modal_freqs.get("f1_hz", 0.0))
+    f2 = float(modal_freqs.get("f2_hz", 0.0))
+    f3 = float(modal_freqs.get("f3_hz", 0.0))
+
+    # Rate-independent modal ratios with division-by-zero protection
+    f2_over_f1 = round(f2 / f1, 6) if f1 > 1e-6 else 0.0
+    f3_over_f1 = round(f3 / f1, 6) if f1 > 1e-6 else 0.0
+
     feature_dict: Dict[str, Any] = {
-        "sampling_rate_hz": fs,
-        "f1_hz": modal_freqs.get("f1_hz", 0.0),
-        "f2_hz": modal_freqs.get("f2_hz", 0.0),
-        "f3_hz": modal_freqs.get("f3_hz", 0.0),
+        # Metadata only (NEVER used as model input)
+        "sampling_rate_hz": measured_fs,
+
+        # Modal features
+        "f1_hz": f1,
+        "f2_hz": f2,
+        "f3_hz": f3,
+        "f2_over_f1": f2_over_f1,
+        "f3_over_f1": f3_over_f1,
     }
 
     # Extract time-domain statistics for all available physical sensors
@@ -261,16 +291,13 @@ def extract_features(
 def extract_window_features(
     df: pd.DataFrame,
     window_size: int = 300,
-    fs: Optional[float] = None,
+    fs: float = NOMINAL_FS_HZ,
 ) -> pd.DataFrame:
     """Extract time and frequency domain features from sliding windows of sensor data.
 
     Preserved for backward compatibility with frontend showcase and existing tests.
-    Uses dynamic sampling rate if fs is not explicitly passed.
+    Defaults to NOMINAL_FS_HZ = 300.0.
     """
-    if fs is None:
-        fs = calculate_sampling_rate(df)
-
     cols = [c for c in SENSOR_COLS if c in df.columns]
     if not cols:
         numeric_cols = list(df.select_dtypes(include=["number"]).columns)
@@ -332,6 +359,7 @@ def build_healthy_baseline(
     undamaged_dfs: Sequence[pd.DataFrame],
     window_size: int = 300,
     use_recording_features: bool = False,
+    fs: float = NOMINAL_FS_HZ,
 ) -> Dict[str, Dict[str, float]]:
     """Build healthy baseline profile (mean and std) from undamaged recordings.
 
@@ -340,6 +368,7 @@ def build_healthy_baseline(
         window_size: Used if use_recording_features is False.
         use_recording_features: If True, extracts one whole-recording Interface A
                                 feature row per DataFrame.
+        fs: Nominal sampling frequency for FFT (default NOMINAL_FS_HZ = 300.0).
 
     Returns:
         Dict mapping feature name to {'mean': float, 'std': float}.
@@ -348,12 +377,15 @@ def build_healthy_baseline(
 
     for df in undamaged_dfs:
         if use_recording_features:
-            feat_row = extract_features(df)
-            # Exclude non-numeric or metadata
-            feat_series = pd.DataFrame([{k: v for k, v in feat_row.items() if isinstance(v, (int, float))}])
-            all_features.append(feat_series)
+            feat_row = extract_features(df, fs=fs)
+            # Filter out non-numeric and disallowed metadata/label keys
+            clean_feats = {
+                k: v for k, v in feat_row.items()
+                if isinstance(v, (int, float)) and k not in NON_FEATURE_COLS
+            }
+            all_features.append(pd.DataFrame([clean_feats]))
         else:
-            feats = extract_window_features(df, window_size=window_size)
+            feats = extract_window_features(df, window_size=window_size, fs=fs)
             if not feats.empty:
                 all_features.append(feats)
 
@@ -381,6 +413,7 @@ def rank_deviations(
     baseline: Dict[str, Dict[str, float]],
     window_size: int = 300,
     use_recording_features: bool = False,
+    fs: float = NOMINAL_FS_HZ,
 ) -> pd.DataFrame:
     """Compare a test recording against the healthy baseline using z-scores.
 
@@ -389,22 +422,32 @@ def rank_deviations(
         baseline: Precomputed healthy baseline dictionary.
         window_size: Sliding window size if use_recording_features is False.
         use_recording_features: If True, compares whole-recording feature row.
+        fs: Nominal sampling rate for FFT (default NOMINAL_FS_HZ = 300.0).
 
     Returns:
         DataFrame sorted by absolute deviation (highest z-score first).
     """
     if use_recording_features:
-        test_mean_feats = {k: v for k, v in extract_features(test_df).items() if isinstance(v, (int, float))}
+        raw_feats = extract_features(test_df, fs=fs)
+        test_mean_feats = {
+            k: v for k, v in raw_feats.items()
+            if isinstance(v, (int, float)) and k not in NON_FEATURE_COLS
+        }
     else:
-        test_feats = extract_window_features(test_df, window_size=window_size)
+        test_feats = extract_window_features(test_df, window_size=window_size, fs=fs)
         if test_feats.empty:
-            # Fallback to whole recording features if window extraction fails
-            test_mean_feats = {k: v for k, v in extract_features(test_df).items() if isinstance(v, (int, float))}
+            raw_feats = extract_features(test_df, fs=fs)
+            test_mean_feats = {
+                k: v for k, v in raw_feats.items()
+                if isinstance(v, (int, float)) and k not in NON_FEATURE_COLS
+            }
         else:
             test_mean_feats = test_feats.mean().to_dict()
 
     deviations: List[Dict[str, Any]] = []
     for feat_name, base_stats in baseline.items():
+        if feat_name in NON_FEATURE_COLS:
+            continue
         if feat_name in test_mean_feats:
             test_val = float(test_mean_feats[feat_name])
             base_mean = float(base_stats["mean"])
@@ -412,7 +455,6 @@ def rank_deviations(
 
             z_score = (test_val - base_mean) / base_std if base_std > 1e-9 else 0.0
 
-            # Parse sensor identifier
             sensor_id = "Global"
             for s in SENSOR_COLS:
                 if feat_name.startswith(f"{s}_"):
@@ -420,8 +462,6 @@ def rank_deviations(
                     break
 
             metric_name = feat_name.replace(f"{sensor_id}_", "")
-
-            # Percent change
             change_pct = ((test_val - base_mean) / base_mean * 100.0) if abs(base_mean) > 1e-9 else 0.0
 
             deviations.append({

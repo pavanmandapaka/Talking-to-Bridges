@@ -10,6 +10,8 @@ from analysis.features import (
     extract_window_features,
     build_healthy_baseline,
     rank_deviations,
+    NOMINAL_FS_HZ,
+    NON_FEATURE_COLS,
     SENSOR_COLS,
 )
 
@@ -33,9 +35,9 @@ def test_calculate_sampling_rate():
 
 
 def test_compute_spectrum():
-    fs = 300.0
-    duration = 5.0  # 5 seconds
-    t = np.arange(0, int(duration * fs)) / fs
+    duration = 5.0  # 5 seconds at nominal 300 Hz
+    n = int(duration * NOMINAL_FS_HZ)
+    t = np.arange(0, n) / NOMINAL_FS_HZ
 
     # Pure sine wave at 8.0 Hz on Sensor_5
     sig5 = 5.0 * np.sin(2 * np.pi * 8.0 * t)
@@ -54,13 +56,13 @@ def test_compute_spectrum():
 
 
 def test_extract_modal_frequencies_synthetic():
-    fs = 300.0
     duration = 10.0
-    t = np.arange(0, int(duration * fs)) / fs
+    n = int(duration * NOMINAL_FS_HZ)
+    t = np.arange(0, n) / NOMINAL_FS_HZ
 
-    # Signal with known 3 bending frequencies: 7.5 Hz, 38.0 Hz, 135.0 Hz
+    # Signal with known 3 bending frequencies: 7.6 Hz, 38.0 Hz, 135.0 Hz
     sig = (
-        3.0 * np.sin(2 * np.pi * 7.5 * t)
+        3.0 * np.sin(2 * np.pi * 7.6 * t)
         + 1.5 * np.sin(2 * np.pi * 38.0 * t)
         + 0.8 * np.sin(2 * np.pi * 135.0 * t)
     )
@@ -76,28 +78,32 @@ def test_extract_modal_frequencies_synthetic():
     assert "f2_hz" in modals
     assert "f3_hz" in modals
 
-    assert pytest.approx(modals["f1_hz"], abs=0.2) == 7.5
+    assert pytest.approx(modals["f1_hz"], abs=0.15) == 7.6
     assert pytest.approx(modals["f2_hz"], abs=0.2) == 38.0
     assert pytest.approx(modals["f3_hz"], abs=0.2) == 135.0
 
 
 def test_extract_features_interface_a():
-    t = np.linspace(0, 4, 1200)
+    n = 1500
+    t = np.arange(n) * 0.0033  # simulates damaged file time axis
+    sig = np.sin(2 * np.pi * 7.6 * (np.arange(n) / NOMINAL_FS_HZ))
     data = {"Relative_Time_Sec": t}
     for s in SENSOR_COLS:
-        data[s] = np.sin(2 * np.pi * 7.7 * t) + np.random.normal(0, 0.05, len(t))
+        data[s] = sig + np.random.normal(0, 0.02, n)
 
     df = pd.DataFrame(data)
     features = extract_features(df)
 
-    # Core modal frequencies present
+    # Core modal frequencies & invariant ratios present
     assert "f1_hz" in features
     assert "f2_hz" in features
     assert "f3_hz" in features
+    assert "f2_over_f1" in features
+    assert "f3_over_f1" in features
     assert "sampling_rate_hz" in features
 
-    # Modal peak near 7.7 Hz
-    assert pytest.approx(features["f1_hz"], abs=0.3) == 7.7
+    # Modal peak near 7.6 Hz
+    assert pytest.approx(features["f1_hz"], abs=0.2) == 7.6
 
     # All sensors have statistical features
     for s in SENSOR_COLS:
@@ -108,6 +114,63 @@ def test_extract_features_interface_a():
         assert f"{s}_peak" in features
         assert f"{s}_crest_factor" in features
         assert f"{s}_p2p" in features
+
+
+def test_sampling_rate_rounding_invariance():
+    """NEW: Verify that the same true physical signal sampled with dt=0.003 (undamaged export)
+    and dt=0.0033 (damaged export) yields identical modal frequencies (within 0.05 Hz)
+    and identical modal ratios, eliminating the 10% export rounding bias.
+    """
+    n_samples = 3000
+    # Physical signal sampled at true 300 Hz
+    t_true = np.arange(n_samples) / NOMINAL_FS_HZ
+    sig = (
+        2.5 * np.sin(2 * np.pi * 7.61 * t_true)
+        + 1.2 * np.sin(2 * np.pi * 37.94 * t_true)
+        + 0.6 * np.sin(2 * np.pi * 125.1 * t_true)
+    )
+
+    # File A: written with dt=0.0030 s (333.33 Hz nominal export)
+    df_333 = pd.DataFrame({
+        "Relative_Time_Sec": np.arange(n_samples) * 0.0030,
+        "Sensor_5": sig,
+    })
+
+    # File B: written with dt=0.0033 s (303.03 Hz nominal export)
+    df_303 = pd.DataFrame({
+        "Relative_Time_Sec": np.arange(n_samples) * 0.0033,
+        "Sensor_5": sig,
+    })
+
+    feats_333 = extract_features(df_333)
+    feats_303 = extract_features(df_303)
+
+    # Both must identify the exact same physical frequencies within 0.05 Hz
+    assert abs(feats_333["f1_hz"] - feats_303["f1_hz"]) <= 0.05
+    assert abs(feats_333["f2_hz"] - feats_303["f2_hz"]) <= 0.05
+    assert abs(feats_333["f3_hz"] - feats_303["f3_hz"]) <= 0.05
+
+    # Ratios f2/f1 and f3/f1 must be identical
+    assert pytest.approx(feats_333["f2_over_f1"], abs=0.02) == feats_303["f2_over_f1"]
+    assert pytest.approx(feats_333["f3_over_f1"], abs=0.02) == feats_303["f3_over_f1"]
+
+
+def test_ratio_features_and_no_metadata_in_features():
+    """NEW: Verify that ratio columns exist and no metadata or label column leaks into features."""
+    df = pd.DataFrame({
+        "Relative_Time_Sec": np.arange(600) * 0.0033,
+        "Sensor_1": np.sin(np.linspace(0, 20, 600)),
+        "Sensor_5": np.cos(np.linspace(0, 20, 600)),
+    })
+
+    feats = extract_features(df)
+    assert "f2_over_f1" in feats
+    assert "f3_over_f1" in feats
+
+    # Disallowed metadata/label columns must not be in model features
+    baseline = build_healthy_baseline([df], use_recording_features=True)
+    for col in NON_FEATURE_COLS:
+        assert col not in baseline, f"Metadata/label '{col}' leaked into healthy baseline features!"
 
 
 def test_backward_compatibility_extract_window_features():
@@ -130,13 +193,11 @@ def test_build_healthy_baseline_and_rank_deviations():
     df1 = pd.DataFrame({"Relative_Time_Sec": t, "Sensor_1": np.random.randn(600)})
     df2 = pd.DataFrame({"Relative_Time_Sec": t, "Sensor_1": np.random.randn(600)})
 
-    # Whole-recording mode
     baseline = build_healthy_baseline([df1, df2], use_recording_features=True)
     assert "Sensor_1_rms" in baseline
     assert "mean" in baseline["Sensor_1_rms"]
     assert "std" in baseline["Sensor_1_rms"]
 
-    # Test deviating recording (scaled by 10)
     test_df = pd.DataFrame({"Relative_Time_Sec": t, "Sensor_1": np.random.randn(600) * 10})
     rankings = rank_deviations(test_df, baseline, use_recording_features=True)
 
