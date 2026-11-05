@@ -140,12 +140,25 @@ Following the band update, `features_dataset.csv` and `healthy_baseline.json` we
   * Detailed inspection shows 18 of 20 recordings cluster tightly between $38.83$ and $39.65\text{ Hz}$ ($\text{median} = 39.35\text{ Hz}$). The remaining variance arises from genuine physical modal excitation differences: single hits at clamp-proximal segments excite a localized vibration mode at $36.8\text{ Hz}$ rather than $39.4\text{ Hz}$.
 * **Total Suspect Rows ($z > 4$):** Dropped by $51\%$ (from 61 down to 30). The remaining 30 flags reflect genuine physical differences between static displacement releases (which excite high Mode 3 participation near $136\text{ Hz}$) and dynamic impulse hammer hits (which settle near $127\text{ Hz}$).
 
+### 7.4 Assumptions, Limitations & Sampling Rate Specifications
+1. **Empirical Selection on Dataset:** The search bands were determined after inspecting the spectral distributions of this dataset, bounded by cantilever beam physics.
+2. **Search-Band Boundary Limitation:** Any modal frequency falling outside the hard search bands will be missed. For instance, in a different specimen or future configuration where $f_2 > 43.5\text{ Hz}$, the picker would not locate the true peak and would instead pick the highest local value within $(36.0, 43.5)\text{ Hz}$.
+3. **Sampling Rates and Nyquist Frequencies:**
+   - **FFT Evaluation Rate:** All frequency spectra and peak picking evaluate at `NOMINAL_FS_HZ = 300.0 Hz` uniformly across all recordings to eliminate the 10% export rounding bias between undamaged and damaged batches. Under this nominal grid, the FFT frequency axis cuts off at $f_{Nyq} = 300.0 / 2 = 150.0\text{ Hz}$.
+   - **File-Specific Measured Rates:** For metadata auditing only, `calculate_sampling_rate()` computes the empirical rate from each file's time delta. Damaged recordings measure $\approx 303.03\text{ Hz}$ ($\Delta t = 0.0033\text{ s}$, physical $f_{Nyq} \approx 151.5\text{ Hz}$), while undamaged recordings measure $\approx 333.33\text{ Hz}$ ($\Delta t = 0.0030\text{ s}$, physical $f_{Nyq} \approx 166.7\text{ Hz}$).
+   - The tightened upper bound for Mode 3 ($142.0\text{ Hz}$) sits cleanly below both the $150.0\text{ Hz}$ nominal FFT limit and the file-specific empirical Nyquist frequencies ($151.5\text{ Hz}$ and $166.7\text{ Hz}$), preventing roll-off filter skirt artifacts.
+
 ---
 
 ## 8. Preprocessing Sign-Off & Handoff
 
 * **For Varshneya (TRN-1):**  
-  Pull this commit and execute `python analysis/build_features_dataset.py` on your machine across the full 460 files. The refined `DEFAULT_MODAL_BANDS` will automatically clean up `3mm_M3` ($f_2$) and eliminate all edge artifacts on the full 460-file set. Train Model A and Model B using `case_id` for grouped Leave-One-Case-Out cross-validation.
+  Pull this commit (or PR branch) and execute the batch extraction using Python module syntax from repository root:
+  ```bash
+  python -m analysis.build_features_dataset
+  ```
+  *(Note: Using module syntax `-m analysis.build_features_dataset` ensures the repository root is properly added to `sys.path`).*  
+  The refined `DEFAULT_MODAL_BANDS` will automatically clean up `3mm_M3` ($f_2$) and eliminate edge artifacts across the full 460 files. Train Model A and Model B using `case_id` for grouped Leave-One-Case-Out cross-validation to evaluate whether the cleaner frequency distributions improve severity prediction metrics.
 * **For Nagarjun (NEW-2 & NEW-3):**  
   The healthy baseline profile at `data/reference/healthy_baseline.json` has been updated with the refined modal bands and invariant ratios. `compute_spectrum(df, sensor)` in `analysis/features.py` is ready for the spectrum overlay charts.
 
