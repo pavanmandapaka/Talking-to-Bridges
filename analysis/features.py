@@ -57,11 +57,14 @@ NON_FEATURE_COLS: set[str] = {
 }
 
 # Search bands for the first three transverse bending natural frequencies (Hz).
-# Healthy cantilever benchmarks at 300 Hz: Mode 1 ~ 7.69 Hz, Mode 2 ~ 37.79 Hz, Mode 3 ~ 134.80 Hz.
+# Based on Euler-Bernoulli/Timoshenko cantilever dynamics and Katam et al., Structures 71 (2025):
+# Mode 1 ~ 7.0 - 7.7 Hz; Mode 2 ~ 36.8 - 41.5 Hz; Mode 3 ~ 124.0 - 138.0 Hz.
+# Bounds are set using physical signal criteria to avoid Nyquist skirts (near 150 Hz)
+# and fixture/transient impact spikes (near 46 Hz):
 DEFAULT_MODAL_BANDS: Dict[str, Tuple[float, float]] = {
-    "f1_hz": (5.5, 10.0),
-    "f2_hz": (32.0, 46.0),
-    "f3_hz": (115.0, 150.0),
+    "f1_hz": (6.5, 8.8),
+    "f2_hz": (36.0, 43.5),
+    "f3_hz": (120.0, 142.0),
 }
 
 

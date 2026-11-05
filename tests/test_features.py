@@ -83,6 +83,37 @@ def test_extract_modal_frequencies_synthetic():
     assert pytest.approx(modals["f3_hz"], abs=0.2) == 135.0
 
 
+def test_modal_bands_reject_nyquist_and_fixture_noise():
+    """Verify that refined modal search bands reject Nyquist edge spikes (149.5 Hz)
+    and fixture impact bounce spikes (45.9 Hz) even when spurious noise has high amplitude.
+    """
+    duration = 10.0
+    n = int(duration * NOMINAL_FS_HZ)
+    t = np.arange(0, n) / NOMINAL_FS_HZ
+
+    # True bending modes + spurious fixture / Nyquist artifacts
+    sig = (
+        2.0 * np.sin(2 * np.pi * 7.60 * t)
+        + 1.2 * np.sin(2 * np.pi * 38.50 * t)
+        + 0.8 * np.sin(2 * np.pi * 126.50 * t)
+        + 2.5 * np.sin(2 * np.pi * 45.90 * t)   # Fixture impact noise at ~46 Hz
+        + 3.0 * np.sin(2 * np.pi * 149.50 * t)  # Nyquist edge spike at ~150 Hz
+    )
+
+    df = pd.DataFrame({
+        "Relative_Time_Sec": t,
+        "Sensor_1": sig,
+        "Sensor_5": sig,
+    })
+
+    modals = extract_modal_frequencies(df)
+    # The picker must pick the true bending modes, rejecting 45.9 Hz and 149.5 Hz
+    assert pytest.approx(modals["f1_hz"], abs=0.15) == 7.60
+    assert pytest.approx(modals["f2_hz"], abs=0.20) == 38.50
+    assert pytest.approx(modals["f3_hz"], abs=0.30) == 126.50
+
+
+
 def test_extract_features_interface_a():
     n = 1500
     t = np.arange(n) * 0.0033  # simulates damaged file time axis
