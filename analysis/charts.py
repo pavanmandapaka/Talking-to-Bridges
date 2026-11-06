@@ -342,6 +342,128 @@ def plot_deviation_heatmap(deviations: pd.DataFrame, z_clip: float = 10.0) -> go
     return fig
 
 
+def _freq_markers(fig: go.Figure, spectrum: dict, freqs: dict, color: str, name: str, ymin_floor: float) -> None:
+    """Mark f1, f2, f3 on a spectrum curve (labelled points on the curve)."""
+    f_axis, amp = spectrum["frequencies_hz"], spectrum["amplitude"]
+    xs, ys, labels = [], [], []
+    for i, key in enumerate(("f1_hz", "f2_hz", "f3_hz"), start=1):
+        f = freqs.get(key)
+        if not f or f <= 0:
+            continue
+        idx = min(range(len(f_axis)), key=lambda j: abs(f_axis[j] - f))
+        xs.append(f)
+        ys.append(max(float(amp[idx]), ymin_floor))
+        labels.append(f"f{i} {f:.2f} Hz")
+    fig.add_trace(
+        go.Scatter(
+            x=xs, y=ys, mode="markers+text", name=f"{name} peaks",
+            text=labels, textposition="top center" if name == "Uploaded" else "bottom center",
+            marker={"size": 10, "color": color, "symbol": "diamond", "line": {"width": 1, "color": "white"}},
+            textfont={"color": color},
+            hovertemplate="%{text}<extra>" + name + "</extra>",
+        )
+    )
+
+
+def plot_spectrum_overlay(
+    healthy_spectrum: dict,
+    test_spectrum: dict,
+    healthy_freqs: dict,
+    test_freqs: dict,
+    x_max: float = 150.0,
+) -> go.Figure:
+    """Healthy spectrum (blue) over the uploaded one (orange), first three peaks marked.
+
+    Spectra are dicts with ``frequencies_hz`` and ``amplitude``; ``*_freqs`` hold f1_hz,
+    f2_hz, f3_hz. Amplitude is on a log axis so the small second and third peaks stay visible.
+    Raises ValueError on bad input.
+    """
+    for label, sp in (("healthy", healthy_spectrum), ("uploaded", test_spectrum)):
+        if not sp or not sp.get("frequencies_hz") or not sp.get("amplitude"):
+            raise ValueError(f"The {label} spectrum is empty.")
+    floor = max(
+        1e-12,
+        min(min(v for v in sp["amplitude"] if v > 0) for sp in (healthy_spectrum, test_spectrum)),
+    )
+    fig = go.Figure()
+    for sp, name, color in ((healthy_spectrum, "Healthy", HEALTHY_COLOR), (test_spectrum, "Uploaded", TEST_COLOR)):
+        fig.add_trace(
+            go.Scatter(
+                x=sp["frequencies_hz"], y=[max(v, floor) for v in sp["amplitude"]],
+                mode="lines", name=name, line={"width": 1.6, "color": color},
+            )
+        )
+    _freq_markers(fig, healthy_spectrum, healthy_freqs, HEALTHY_COLOR, "Healthy", floor)
+    _freq_markers(fig, test_spectrum, test_freqs, TEST_COLOR, "Uploaded", floor)
+    fig.update_layout(
+        title=f"Frequency spectrum: healthy vs uploaded ({UNITS_NOTE})",
+        height=460,
+        hovermode="x unified",
+        legend={"orientation": "h", "y": 1.0, "yanchor": "bottom", "x": 1.0, "xanchor": "right"},
+    )
+    fig.update_xaxes(title_text="Frequency (Hz)", range=[0, x_max])
+    # Ignore the empty first bins (below 1 Hz) when choosing the y range.
+    visible = [
+        v for sp in (healthy_spectrum, test_spectrum)
+        for f, v in zip(sp["frequencies_hz"], sp["amplitude"]) if 1.0 <= f <= x_max and v > 0
+    ]
+    if visible:
+        fig.update_yaxes(range=[math.log10(min(visible)) - 0.3, math.log10(max(visible)) + 0.5])
+    fig.update_yaxes(title_text="Amplitude (log scale)", type="log")
+    return fig
+
+
+def plot_frequency_bars(deviations: Sequence[dict], spreads: float = Z_LIMIT) -> go.Figure:
+    """f1, f2, f3: healthy value against the uploaded value, with the percentage change.
+
+    ``deviations`` is the Interface B list (feature, value, healthy_typical, healthy_spread,
+    change_percent, score). The black whisker on the healthy bar is the healthy range
+    (+/- ``spreads`` spreads). One panel per mode, each with its own scale.
+    Raises ValueError when f1..f3 are missing.
+    """
+    by_name = {d["feature"]: d for d in deviations}
+    keys = [k for k in ("f1_hz", "f2_hz", "f3_hz") if k in by_name]
+    if not keys:
+        raise ValueError("No frequency values (f1-f3) are available to chart.")
+    titles = []
+    for k in keys:
+        d = by_name[k]
+        titles.append(f"Mode {k[1]}: {d['change_percent']:+.1f}%")
+    fig = make_subplots(rows=1, cols=len(keys), subplot_titles=titles, horizontal_spacing=0.09)
+    for i, k in enumerate(keys, start=1):
+        d = by_name[k]
+        outside = abs(d["score"]) > spreads
+        fig.add_trace(
+            go.Bar(
+                x=["Healthy"], y=[d["healthy_typical"]], name="Healthy", marker_color=HEALTHY_COLOR,
+                error_y={"type": "constant", "value": spreads * d["healthy_spread"], "color": "black", "thickness": 1.5},
+                text=[f"{d['healthy_typical']:.2f}"], textposition="inside", insidetextanchor="middle",
+                legendgroup="h", showlegend=i == 1,
+                hovertemplate=f"Healthy {k}: %{{y:.3f}} Hz<extra></extra>",
+            ),
+            row=1, col=i,
+        )
+        fig.add_trace(
+            go.Bar(
+                x=["Uploaded"], y=[d["value"]], name="Uploaded", marker_color=TEST_COLOR,
+                marker_line={"width": 3 if outside else 0, "color": "#a02020"},
+                text=[f"{d['value']:.2f}"], textposition="inside", insidetextanchor="middle",
+                legendgroup="t", showlegend=i == 1,
+                hovertemplate=f"Uploaded {k}: %{{y:.3f}} Hz<extra></extra>",
+            ),
+            row=1, col=i,
+        )
+        top = max(d["healthy_typical"] + spreads * d["healthy_spread"], d["value"])
+        fig.update_yaxes(range=[0, top * 1.12], row=1, col=i)  # bars start at zero
+    fig.update_layout(
+        title="First three bending frequencies: healthy vs uploaded (Hz)",
+        height=450, barmode="group", showlegend=True,
+        legend={"orientation": "h", "y": -0.12, "yanchor": "top", "x": 0.5, "xanchor": "center"},
+    )
+    fig.update_yaxes(title_text="Frequency (Hz)", row=1, col=1)
+    return fig
+
+
 def figure_to_json(fig: go.Figure) -> str:
     """JSON string for the API (`plot_json`); the app rebuilds it with plotly.io.from_json."""
     return fig.to_json()

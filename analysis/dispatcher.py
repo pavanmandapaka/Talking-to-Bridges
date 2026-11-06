@@ -150,6 +150,8 @@ _FEATURE_WORDS = {
     "deviation", "deviations", "deviate", "range",
 }
 _HEATMAP_WORDS = {"heatmap", "heat"}
+_SPECTRUM_WORDS = {"spectrum", "spectra", "spectral", "fft", "peaks", "peak"}
+_FREQUENCY_WORDS = {"frequency", "frequencies", "modal", "natural", "f1", "f2", "f3", "mode", "modes"}
 
 
 _SENSOR_PHRASE = re.compile(r"\bsensor[\s_-]*([1-9])\b")
@@ -164,12 +166,16 @@ def _named_sensor(query: str, df: Optional[pd.DataFrame]) -> Optional[str]:
 
 
 def _detect_comparison(tokens: List[str]) -> Optional[str]:
-    """'signals' | 'features' | 'heatmap' when the query asks to compare with the healthy state."""
+    """'signals' | 'features' | 'heatmap' | 'spectrum' | 'frequencies' when the query asks to compare with the healthy state."""
     words = set(tokens)
     if not words & _COMPARE_WORDS:
         return None
     if words & _HEATMAP_WORDS:
         return "heatmap"
+    if words & _SPECTRUM_WORDS:
+        return "spectrum"
+    if words & _FREQUENCY_WORDS:
+        return "frequencies"
     if words & _FEATURE_WORDS:
         return "features"
     return "signals"
@@ -228,6 +234,9 @@ def _detect_tool(query: str) -> Optional[str]:
         for kw in keywords:
             kw_tokens = set(_tokenize(kw))
             if kw_tokens.issubset(tokens) or any(tok.startswith(kw) for tok in tokens):
+                # A spectrum / peaks question about the healthy state wants the chart (NEW-3).
+                if tool_name == "baseline" and tokens & _SPECTRUM_WORDS:
+                    return "chart_data"
                 return tool_name
     return None
 
@@ -469,14 +478,18 @@ class ToolDispatcher:
             )
 
         if tool_name == "baseline":
-            rankings = data.get("deviation_ranking", [])
-            rank_str = ", ".join([f"{r.get('sensor')}: {r.get('deviation_score')} ({r.get('status')})" for r in rankings[:3]])
+            devs = [d for d in data.get("deviations", []) if d.get("group") == "frequency"][:3]
+            dev_str = "; ".join(
+                f"{d.get('feature')}: {d.get('change_percent'):+.1f}% ({d.get('score')} spreads)" for d in devs
+            )
+            nh = data.get("n_healthy", {}) or {}
             return (
                 f"[ANALYTICAL RESULT: baseline]\n"
-                f"Status: {data.get('status')}  |  "
-                f"Sensors evaluated: {', '.join(data.get('sensors_evaluated', []))}\n"
-                f"Deviation ranking: {rank_str}\n"
-                f"Note: {data.get('note', '')}"
+                f"Status: {data.get('status')}  |  Overall flag vs healthy baseline: {data.get('overall_flag')}\n"
+                f"Frequency deviations: {dev_str or 'none'}\n"
+                f"Baseline built from {nh.get('recordings', 0)} healthy recordings, {nh.get('cases', 0)} case(s).\n"
+                f"Summary: {data.get('summary', '')}\n"
+                f"Limit to mention: {data.get('caveat', '')}"
             )
 
         if tool_name == "model_result":

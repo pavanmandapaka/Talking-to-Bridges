@@ -89,22 +89,22 @@ class TestTask2BaselineTool:
         assert tool.name == "baseline"
         assert tool.category == "statistics"
 
-    def test_baseline_tool_execution_dummy_placeholder(self):
+    def test_baseline_tool_without_data_is_unavailable(self):
         res = registry.execute("baseline", {})
         assert res["status"] == "success"
         data = res["data"]
-        assert data["status"] == "Healthy"
-        assert len(data["sensors_evaluated"]) > 0
-        assert len(data["deviation_ranking"]) > 0
-        assert "healthy_baseline_summary" in data
+        assert data["overall_flag"] == "unavailable"
+        assert data["status"] == "Unavailable"
         assert json.dumps(data) is not None
 
-    def test_baseline_tool_execution_with_df(self, sample_df):
+    def test_baseline_tool_with_df_has_old_and_new_fields(self, sample_df, tmp_path, monkeypatch):
+        monkeypatch.setenv("HEALTHY_REFERENCE_DIR", str(tmp_path))  # no baseline here
         res = registry.execute("baseline", {"sensor_id": "Sensor_1"}, df=sample_df)
         assert res["status"] == "success"
         data = res["data"]
-        assert "status" in data
-        assert len(data["deviation_ranking"]) > 0
+        for key in ("overall_flag", "deviations", "healthy_reference", "n_healthy",
+                    "status", "deviation_ranking", "healthy_baseline_summary", "note"):
+            assert key in data
 
     def test_baseline_tool_accepts_custom_swappable_handler(self):
         """Verify Eswar's real baseline function can replace handler cleanly."""
@@ -196,4 +196,4 @@ class TestTask4LLMSummaryExtensions:
         summary = res.llm_summary
         assert "[ANALYTICAL RESULT: baseline]" in summary
         assert "Status:" in summary
-        assert "Deviation ranking:" in summary
+        assert "Frequency deviations:" in summary

@@ -255,7 +255,7 @@ class ModelResultOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 6. baseline (placeholder for Eswar's healthy baseline module)
+# 6. baseline (NEW-2: healthy baseline comparison)
 # ---------------------------------------------------------------------------
 
 class BaselineInput(BaseModel):
@@ -272,13 +272,31 @@ class BaselineInput(BaseModel):
 
 
 class BaselineOutput(BaseModel):
-    """Structured result from the baseline tool."""
+    """Structured result from the baseline tool (NEW-2, Interface B + older fields)."""
 
-    status: str = Field(..., description="Overall baseline status ('Healthy', 'Degraded', 'Alert').")
+    overall_flag: str = Field(
+        default="unavailable",
+        description="'normal', 'abnormal' (different from the healthy baseline) or 'unavailable'.",
+    )
+    deviations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Ranked: feature, value, healthy_typical, healthy_spread, change_percent, score.",
+    )
+    healthy_reference: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Healthy f1-f3 (and optionally a reference spectrum) for the charts.",
+    )
+    n_healthy: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Number of healthy recordings and cases behind the baseline.",
+    )
+    summary: str = ""
+    caveat: str = ""
+    status: str = Field(default="Unavailable", description="'Healthy', 'Abnormal' or 'Unavailable'.")
     sensors_evaluated: List[str] = Field(default_factory=list)
     deviation_ranking: List[Dict[str, Any]] = Field(default_factory=list)
     healthy_baseline_summary: Dict[str, Any] = Field(default_factory=dict)
-    note: str = "Dummy baseline result - pluggable with Eswar's real baseline module."
+    note: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -309,11 +327,12 @@ class ChartDataInput(BaseModel):
         default=None,
         description="Optional sensor_id filter used when show_anomalies is true.",
     )
-    comparison: Optional[Literal["signals", "features", "heatmap"]] = Field(
+    comparison: Optional[Literal["signals", "features", "heatmap", "spectrum", "frequencies"]] = Field(
         default=None,
         description=(
             "Compare the uploaded recording with the healthy reference: 'signals' (overlay), "
-            "'features' (feature deviations vs the healthy range) or 'heatmap' (sensor x feature)."
+            "'features' (feature deviations vs the healthy range), 'heatmap' (sensor x feature), "
+            "'spectrum' (frequency spectrum, f1-f3 marked) or 'frequencies' (f1-f3 bars with percent change)."
         ),
     )
 
