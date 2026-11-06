@@ -787,72 +787,45 @@ def handle_model_result(
 
 
 # ---------------------------------------------------------------------------
-# 4.6  baseline  (Eswar's healthy baseline / deviation placeholder)
+# 4.6  baseline  (NEW-2: healthy baseline + comparison, Interface B)
 # ---------------------------------------------------------------------------
+
+_BASELINE_STATUS = {"normal": "Healthy", "abnormal": "Abnormal", "unavailable": "Unavailable"}
+
 
 def handle_baseline(
     arguments: Dict[str, Any],
     df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-    """Evaluate current sensor readings against a healthy baseline (dummy first).
+    """Compare the uploaded recording with the healthy baseline (analysis.baseline).
 
-    Pluggable interface: Eswar's healthy-baseline / deviation ranking function
-    can replace this handler without changing the tool registry or dispatcher contract.
+    Returns the Interface B fields (overall_flag, deviations, healthy_reference, n_healthy)
+    plus the older fields (status, sensors_evaluated, deviation_ranking,
+    healthy_baseline_summary, note) so existing callers keep working.
+    The healthy spectrum is left out here (large); the charts add it themselves.
     """
-    sensor_id = arguments.get("sensor_id")
-    metric = arguments.get("metric")
+    from analysis.baseline import compare_to_baseline
 
-    if df is not None:
-        numeric_cols = list(df.select_dtypes(include=["number"]).columns)
-        exclude = {"Relative_Time_Sec", "DateTime", "timestamp"}
-        eval_sensors = [c for c in numeric_cols if c not in exclude]
-        if sensor_id and sensor_id in df.columns and sensor_id not in eval_sensors:
-            eval_sensors.append(sensor_id)
-        if not eval_sensors:
-            eval_sensors = ["Sensor_1", "Sensor_2", "Sensor_3"]
-
-        ranking = []
-        baseline_info = {}
-        for s in eval_sensors[:5]:
-            series = pd.to_numeric(df[s], errors="coerce").dropna()
-            if not series.empty:
-                mean_val = float(series.mean())
-                std_val = float(series.std()) if len(series) > 1 else 1.0
-                max_val = float(series.max())
-                dev_score = round(abs(max_val - mean_val) / (std_val if std_val > 0 else 1.0), 3)
-                ranking.append({
-                    "sensor": s,
-                    "deviation_score": dev_score,
-                    "status": "Normal" if dev_score < 2.5 else "Degraded",
-                })
-                baseline_info[s] = {"healthy_mean": round(mean_val, 4), "healthy_std": round(std_val, 4)}
-
-        ranking.sort(key=lambda x: x["deviation_score"], reverse=True)
-        max_dev = ranking[0]["deviation_score"] if ranking else 0.0
-        overall_status = "Healthy" if max_dev < 2.5 else ("Alert" if max_dev > 4.0 else "Degraded")
-
-        return {
-            "status": overall_status,
-            "sensors_evaluated": eval_sensors,
-            "deviation_ranking": ranking,
-            "healthy_baseline_summary": baseline_info,
-            "note": "Baseline evaluated on current dataset (ready for Eswar's healthy baseline module).",
+    if df is None:
+        result = {
+            "overall_flag": "unavailable",
+            "deviations": [],
+            "healthy_reference": {},
+            "n_healthy": {"recordings": 0, "cases": 0, "case_names": []},
+            "summary": "Upload a sensor recording first, then ask for the comparison with the healthy baseline.",
+            "caveat": "",
         }
+    else:
+        result = compare_to_baseline(df, include_spectrum=False)
 
-    # Deterministic dummy placeholder when no df is available
+    sensors = [c for c in df.columns if str(c).startswith("Sensor_")] if df is not None else []
     return {
-        "status": "Healthy",
-        "sensors_evaluated": ["Sensor_1", "Sensor_2", "Sensor_3", "Sensor_4", "Sensor_5"],
-        "deviation_ranking": [
-            {"sensor": "Sensor_3", "deviation_score": 1.42, "status": "Normal"},
-            {"sensor": "Sensor_1", "deviation_score": 0.85, "status": "Normal"},
-            {"sensor": "Sensor_2", "deviation_score": 0.31, "status": "Normal"},
-        ],
-        "healthy_baseline_summary": {
-            "Sensor_1": {"healthy_mean": 0.02, "healthy_std": 0.005},
-            "Sensor_3": {"healthy_mean": 0.015, "healthy_std": 0.004},
-        },
-        "note": "Dummy baseline result - pluggable with Eswar's real baseline module.",
+        **result,
+        "status": _BASELINE_STATUS.get(result["overall_flag"], "Unavailable"),
+        "sensors_evaluated": sensors,
+        "deviation_ranking": result["deviations"],
+        "healthy_baseline_summary": result.get("healthy_reference", {}).get("frequencies_hz", {}),
+        "note": result["summary"],
     }
 
 
@@ -929,7 +902,7 @@ def _sensor_chart(
     }
 
 
-COMPARISON_MODES = ("signals", "features", "heatmap")
+COMPARISON_MODES = ("signals", "features", "heatmap", "spectrum", "frequencies")
 COMPARISON_TOP_N = 12
 
 
@@ -944,6 +917,8 @@ def _comparison_chart(
     signals  - healthy recording overlaid on the uploaded one, one panel per sensor
     features - feature values against the healthy range (analysis.features.rank_deviations)
     heatmap  - the same deviations as a sensor x feature grid
+    spectrum    - healthy vs uploaded frequency spectrum, first three peaks marked (NEW-3)
+    frequencies - f1, f2, f3 bars against the healthy values with percent change (NEW-3)
 
     The healthy reference is read from the reference folder (analysis.healthy_reference).
     When it is missing the result is the usual placeholder with an explanation.
@@ -961,6 +936,9 @@ def _comparison_chart(
 
     def _placeholder(reason: str) -> Dict[str, Any]:
         return {"x_col": x_col, "y_col": y_col, "plot_json": "{}", "explanation": reason}
+
+    if mode in ("spectrum", "frequencies"):
+        return _frequency_chart(df, x_col, y_col, mode)
 
     healthy = load_healthy_recordings()
     if not healthy:
@@ -1031,6 +1009,65 @@ def _comparison_chart(
         "comparison": mode,
         "plot_json": figure_to_json(fig),
         "explanation": f"{how} {verdict} Values are in unknown units.",
+    }
+
+
+def _frequency_chart(df: pd.DataFrame, x_col: str, y_col: str, mode: str) -> Dict[str, Any]:
+    """NEW-3 charts, built from NEW-2's Interface B (analysis.baseline).
+
+    spectrum    - healthy spectrum (blue) over the uploaded one (orange), f1-f3 marked
+    frequencies - bars of f1, f2, f3 against the healthy values with percent change
+    """
+    from analysis.baseline import compare_to_baseline, recording_spectrum
+    from analysis.charts import figure_to_json, plot_frequency_bars, plot_spectrum_overlay
+    from analysis.features import extract_features
+    from analysis.healthy_reference import reference_dir
+
+    def _placeholder(reason: str) -> Dict[str, Any]:
+        return {"x_col": x_col, "y_col": y_col, "comparison": mode, "plot_json": "{}", "explanation": reason}
+
+    result = compare_to_baseline(df, include_spectrum=(mode == "spectrum"))
+    if result["overall_flag"] == "unavailable":
+        return _placeholder(f"Cannot compare with the healthy state: {result['summary']}")
+
+    n = result["n_healthy"]
+    caveat = result["caveat"]
+    if mode == "spectrum":
+        healthy_spec = result["healthy_reference"].get("spectrum")
+        if not healthy_spec:
+            return _placeholder(
+                "Cannot draw the healthy spectrum: no healthy recording is available "
+                f"(expected .csv/.xlsx/.xlsm files in '{reference_dir()}')."
+            )
+        row = extract_features(df)
+        fig = plot_spectrum_overlay(
+            healthy_spec,
+            recording_spectrum(df),
+            result["healthy_reference"]["frequencies_hz"],
+            {k: row.get(k) for k in ("f1_hz", "f2_hz", "f3_hz")},
+        )
+        how = (
+            "The chart is a frequency spectrum (amplitude on a log scale): the healthy "
+            f"spectrum (blue, median of {healthy_spec['n_recordings']} healthy recording(s)) "
+            "against the uploaded recording (orange). Diamonds mark the first three peaks "
+            "(f1, f2, f3). A peak that moved sideways means a changed natural frequency."
+        )
+        shown = "spectrum"
+    else:
+        fig = plot_frequency_bars(result["deviations"])
+        how = (
+            "The chart shows the first three bending frequencies: healthy (blue) against "
+            "uploaded (orange), one panel per mode, bars start at zero. The title of each "
+            "panel is the percent change; the black whisker on the healthy bar is the healthy "
+            "range (3 spreads); a red outline means the uploaded value is outside it."
+        )
+        shown = "f1, f2, f3"
+    return {
+        "x_col": x_col,
+        "y_col": shown,
+        "comparison": mode,
+        "plot_json": figure_to_json(fig),
+        "explanation": f"{how} {result['summary']} {caveat}",
     }
 
 
@@ -1331,8 +1368,10 @@ registry.register(ToolDefinition(
 registry.register(ToolDefinition(
     name="baseline",
     description=(
-        "Evaluates sensor readings against healthy baseline values and produces "
-        "a deviation ranking. Placeholder for Eswar's healthy baseline module."
+        "Compares the uploaded recording with the healthy baseline (median and spread of the "
+        "healthy recordings). Returns overall_flag (normal/abnormal), ranked deviations with "
+        "percent change (for example 'mode 2 frequency 6 percent higher'), the healthy "
+        "reference and how many healthy recordings and cases the baseline uses."
     ),
     category="statistics",
     input_schema={
@@ -1352,6 +1391,12 @@ registry.register(ToolDefinition(
     output_schema={
         "type": "object",
         "properties": {
+            "overall_flag":             {"type": "string"},
+            "deviations":               {"type": "array"},
+            "healthy_reference":        {"type": "object"},
+            "n_healthy":                {"type": "object"},
+            "summary":                  {"type": "string"},
+            "caveat":                   {"type": "string"},
             "status":                   {"type": "string"},
             "sensors_evaluated":        {"type": "array", "items": {"type": "string"}},
             "deviation_ranking":        {"type": "array"},
