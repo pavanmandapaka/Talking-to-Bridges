@@ -23,6 +23,11 @@ from rag.document_loader import (
 )
 from rag.embeddings import EmbeddingError, EmbeddingService
 from rag.ingestion import DOCUMENTS_DIR, ingest_csv, ingest_document
+from analysis.sensor_pipeline import (
+    clean_sensor_bytes,
+    SensorDataError,
+    SkippedFileError,
+)
 from rag.csv_processor import CorruptedCSVError, EmptyCSVError
 from rag.retrieval import RetrievedChunk, VectorRetriever
 from rag.vector_store import FAISSVectorStore, VectorStoreError
@@ -74,6 +79,8 @@ class UploadResponse(BaseModel):
     rows: int | None = None
     columns: int | None = None
     column_names: list[str] | None = None
+    # Populated for Excel (.xlsx/.xlsm) uploads — relative path of the clean CSV
+    clean_data_path: str | None = None
 
 
 class RetrieveRequest(BaseModel):
@@ -120,10 +127,12 @@ async def upload(file: Annotated[UploadFile, File(...)]):
         )
 
     suffix = Path(file.filename).suffix.lower()
-    if suffix not in {".pdf", ".docx", ".txt", ".csv"}:
+    _EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
+    _DOCUMENT_SUFFIXES = {".pdf", ".docx", ".txt", ".csv"}
+    if suffix not in (_DOCUMENT_SUFFIXES | _EXCEL_SUFFIXES):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file format '{suffix}'. Supported formats are: .pdf, .docx, .txt, .csv",
+            detail=f"Unsupported file format '{suffix}'. Supported formats are: .pdf, .docx, .txt, .csv, .xlsx, .xlsm",
         )
 
     document_id = f"doc-{uuid.uuid4().hex[:8]}"
@@ -134,14 +143,49 @@ async def upload(file: Annotated[UploadFile, File(...)]):
             raise HTTPException(status_code=413, detail="File too large")
             
         DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        import os
-        safe_filename = os.path.basename(file.filename)
+        safe_filename = Path(file.filename).name
         file_path = DOCUMENTS_DIR / f"{document_id}_{safe_filename}"
         
         temp_vector_store = FAISSVectorStore()
+        clean_csv_name: str | None = None  # set only for Excel uploads
         
-        if suffix == ".csv":
-            import asyncio
+        if suffix in _EXCEL_SUFFIXES:
+            # --- NEW-1: Excel sensor recording path ---
+            # 1. Run the Week 5 cleaner (supports 7-col Damaged and 9-col Undamaged layouts)
+            try:
+                clean_df, _sensor_report = await asyncio.to_thread(
+                    clean_sensor_bytes, content, file.filename
+                )
+            except SkippedFileError as exc:
+                raise HTTPException(status_code=400, detail=f"File skipped by sensor cleaner: {exc}") from None
+            except SensorDataError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid sensor recording: {exc}") from None
+
+            # 2. Persist the cleaned DataFrame as CSV (what analysis tools load)
+            clean_csv_name = f"{document_id}_{Path(file.filename).stem}.csv"
+            clean_csv_path = DOCUMENTS_DIR / clean_csv_name
+            clean_df.to_csv(clean_csv_path, index=False, date_format="%Y-%m-%d %H:%M:%S.%f")
+
+            # 3. Ingest clean CSV for RAG so the chat endpoint can query it
+            clean_csv_bytes = clean_csv_path.read_bytes()
+            ingest_result = await asyncio.to_thread(
+                ingest_csv,
+                clean_csv_name,
+                clean_csv_bytes,
+                document_id,
+                embedding_service,
+                temp_vector_store,
+            )
+            # Override with clean-data dimensions
+            ingest_result.rows = len(clean_df)
+            ingest_result.columns = len(clean_df.columns)
+            ingest_result.column_names = list(clean_df.columns)
+
+            # 4. Also save the raw Excel bytes for audit trail
+            file_path = DOCUMENTS_DIR / f"{document_id}_{safe_filename}"
+            file_path.write_bytes(content)
+
+        elif suffix == ".csv":
             ingest_result = await asyncio.to_thread(
                 ingest_csv,
                 file.filename,
@@ -151,7 +195,6 @@ async def upload(file: Annotated[UploadFile, File(...)]):
                 temp_vector_store,
             )
         else:
-            import asyncio
             ingest_result = await asyncio.to_thread(
                 ingest_document,
                 file.filename,
@@ -174,7 +217,9 @@ async def upload(file: Annotated[UploadFile, File(...)]):
         raise HTTPException(status_code=500, detail=str(error))
 
     # Keep the raw upload so /chat and the analytical tools can load it as a DataFrame
-    file_path.write_bytes(content)
+    # For Excel uploads, file_path is already written inside the Excel branch above.
+    if suffix not in _EXCEL_SUFFIXES:
+        file_path.write_bytes(content)
 
     _uploaded_documents.clear()
     chunks = [
@@ -195,6 +240,7 @@ async def upload(file: Annotated[UploadFile, File(...)]):
         rows=ingest_result.rows if hasattr(ingest_result, 'rows') else None,
         columns=ingest_result.columns if hasattr(ingest_result, 'columns') else None,
         column_names=ingest_result.column_names if hasattr(ingest_result, 'column_names') else None,
+        clean_data_path=clean_csv_name if suffix in _EXCEL_SUFFIXES else None,
     )
 
 def _get_all_chunks() -> list[ChunkResponse]:
@@ -534,7 +580,13 @@ async def analyze_csv(
 ):
     try:
         content = await file.read()
-        df = pd.read_csv(io.BytesIO(content), comment="#")
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix in (".xlsx", ".xlsm"):
+            df, _ = await asyncio.to_thread(
+                clean_sensor_bytes, content, file.filename or "recording.xlsx"
+            )
+        else:
+            df = pd.read_csv(io.BytesIO(content), comment="#")
         
         from analysis.tools import registry
         tool_result = registry.execute("chart_data", {"x_col": time_col, "y_col": val_col}, df=df)

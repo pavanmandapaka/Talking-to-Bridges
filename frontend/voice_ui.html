@@ -198,96 +198,15 @@
         .ai-msg { color: var(--accent-blue); margin-bottom: 12px; border-bottom: 1px solid #282c37; padding-bottom: 8px; line-height: 1.4; }
         .sys-msg { color: var(--accent-amber); margin-bottom: 8px; font-size: 12px; font-style: italic; }
     </style>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js">
-        async function generateChart() {
-            const fileInput = document.getElementById('file-upload');
-            const file = fileInput.files[0];
-            const xCol = document.getElementById('x-axis-select').value;
-            const yCol = document.getElementById('y-axis-select').value;
-            
-            if (!file || !xCol || !yCol) {
-                alert("Please select a file, X-axis, and Y-axis.");
-                return;
-            }
-
-            statusEl.innerText = "Analyzing data and generating chart...";
-            
-            const formData = new FormData();
-            formData.append("file", file);
-            formData.append("time_col", xCol);
-            formData.append("val_col", yCol);
-
-            try {
-                const res = await fetch(`${BACKEND_URL}/analyze_csv`, { method: "POST", body: formData });
-                const data = await res.json();
-
-                if (res.ok) {
-                    statusEl.innerText = "Chart generated successfully!";
-                    
-                    // Add explanation to chat
-                    const aiMsg = document.createElement('div');
-                    aiMsg.className = 'ai-msg';
-                    aiMsg.innerHTML = '<strong>System:</strong><br/>' + data.explanation;
-                    chatLog.appendChild(aiMsg);
-                    
-                    // Create Plotly div
-                    const plotDiv = document.createElement('div');
-                    plotDiv.style.width = "100%";
-                    plotDiv.style.height = "350px";
-                    plotDiv.style.marginTop = "10px";
-                    plotDiv.style.marginBottom = "20px";
-                    plotDiv.id = 'plot-' + Date.now();
-                    chatLog.appendChild(plotDiv);
-                    
-                    chatLog.scrollTop = chatLog.scrollHeight;
-                    
-                    // Render Plotly chart
-                    const fig = JSON.parse(data.fig_json);
-                    Plotly.newPlot(plotDiv.id, fig.data, fig.layout, {responsive: true});
-                    
-                    chatLog.scrollTop = chatLog.scrollHeight;
-
-                    // Play audio
-                    if (data.audio_base64) {
-                        const audioBlob = b64toBlob(data.audio_base64, data.content_type);
-                        const audioUrl = URL.createObjectURL(audioBlob);
-                        if (currentAudio) currentAudio.pause();
-                        currentAudio = new Audio(audioUrl);
-                        currentAudio.play();
-                    }
-                } else {
-                    statusEl.innerText = "Error: " + (data.detail || "Analysis failed");
-                }
-            } catch (err) {
-                console.error(err);
-                statusEl.innerText = "Failed to generate chart.";
-            }
-        }
-        
-        function b64toBlob(b64Data, contentType='', sliceSize=512) {
-            const byteCharacters = atob(b64Data);
-            const byteArrays = [];
-            for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
-                const slice = byteCharacters.slice(offset, offset + sliceSize);
-                const byteNumbers = new Array(slice.length);
-                for (let i = 0; i < slice.length; i++) {
-                    byteNumbers[i] = slice.charCodeAt(i);
-                }
-                const byteArray = new Uint8Array(byteNumbers);
-                byteArrays.push(byteArray);
-            }
-            return new Blob(byteArrays, {type: contentType});
-        }
-
-    </script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 </head>
 <body>
 
     <div class="upload-container">
-        <input type="file" id="file-upload" accept=".pdf,.txt,.docx,.csv" style="display:none;" onchange="uploadDocument()">
+        <input type="file" id="file-upload" accept=".pdf,.txt,.docx,.csv,.xlsx,.xlsm" style="display:none;" onchange="uploadDocument()">
         <div class="upload-btn-group">
             <button onclick="document.getElementById('file-upload').click()" class="upload-btn">
-                📂 Upload Context (CSV / Docs)
+                📂 Upload Context (Excel / CSV / Docs)
             </button>
         </div>
         <div id="upload-status"></div>
@@ -296,7 +215,7 @@
             <div id="card-details"></div>
             
             <div id="card-csv-details" class="csv-summary" style="display:none;">
-                <span class="csv-badge">CSV DATA</span>
+                <span class="csv-badge" id="data-badge">CSV DATA</span>
                 <span id="csv-shape-info"></span>
                 <div class="column-tags" id="csv-columns-list"></div>
                 
@@ -311,7 +230,6 @@
                     <button onclick="generateChart()" class="upload-btn" style="margin-top: 5px; background: #0055ff; border-color: #0044cc;">📊 Generate</button>
                 </div>
             </div>
-        </div>
         </div>
     </div>
 
@@ -341,6 +259,8 @@
         let isRecording = false;
         let currentAudio = null;
         let localStream = null;
+        let activeDocId = null;
+        let activeDocContext = "";
 
         async function uploadDocument() {
             const fileInput = document.getElementById('file-upload');
@@ -356,7 +276,15 @@
             if (!file) return;
 
             const isCsv = file.name.toLowerCase().endsWith('.csv');
-            statusDiv.innerText = isCsv ? "Parsing CSV & generating vector embeddings..." : "Uploading to vector database...";
+            const isExcel = file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xlsm');
+
+            if (isExcel) {
+                statusDiv.innerText = "Cleaning sensor recording (.xlsx/.xlsm) & indexing...";
+            } else if (isCsv) {
+                statusDiv.innerText = "Parsing CSV & generating vector embeddings...";
+            } else {
+                statusDiv.innerText = "Uploading to vector database...";
+            }
             statusDiv.style.color = "#aaa";
 
             const formData = new FormData();
@@ -367,20 +295,53 @@
                 const data = await res.json();
 
                 if (res.ok) {
-                    statusDiv.innerText = isCsv ? "CSV processed and indexed into FAISS!" : "Document processed & ready!";
+                    if (isExcel) {
+                        statusDiv.innerText = "Sensor recording cleaned and indexed into FAISS!";
+                    } else if (isCsv) {
+                        statusDiv.innerText = "CSV processed and indexed into FAISS!";
+                    } else {
+                        statusDiv.innerText = "Document processed & ready!";
+                    }
                     statusDiv.style.color = "#00ff88";
 
                     uploadCard.style.display = "block";
                     cardFilename.innerText = file.name;
-                    cardDetails.innerText = `Chunks Created: ${data.chunks_created} (Doc ID: ${data.document_id})`;
+                    
+                    if (data.clean_data_path) {
+                        cardDetails.innerHTML = `Chunks: <strong>${data.chunks_created}</strong> (Doc ID: <code>${data.document_id}</code>)<br/><span style="color:#00ff88; font-size:11px;">Clean CSV: ${data.clean_data_path}</span>`;
+                    } else {
+                        cardDetails.innerText = `Chunks Created: ${data.chunks_created} (Doc ID: ${data.document_id})`;
+                    }
 
-                    if (data.file_type === "csv" || isCsv) {
+                    // Save active document context for conversational RAG
+                    activeDocId = data.document_id;
+                    if (isExcel || data.file_type === "xlsx" || data.file_type === "xlsm") {
+                        const colsStr = (data.column_names || []).join(", ");
+                        activeDocContext = `\n[Active Sensor Recording: ${file.name}, Rows: ${data.rows}, Columns: ${colsStr}]`;
+                    } else if (isCsv || data.file_type === "csv") {
+                        const colsStr = (data.column_names || []).join(", ");
+                        activeDocContext = `\n[Active CSV Document: ${file.name}, Rows: ${data.rows}, Columns: ${colsStr}]`;
+                    } else {
+                        activeDocContext = `\n[Active Document: ${file.name}]`;
+                    }
+
+                    const isDataFile = data.file_type === "csv" || data.file_type === "xlsx" || data.file_type === "xlsm" || isCsv || isExcel;
+                    if (isDataFile) {
                         cardCsvDetails.style.display = "block";
-                        const rows = data.rows !== undefined ? data.rows : "N/A";
-                        const cols = data.columns !== undefined ? data.columns : "N/A";
+                        const badge = document.getElementById('data-badge');
+                        if (badge) {
+                            if (isExcel || data.file_type === "xlsx" || data.file_type === "xlsm") {
+                                badge.innerText = "SENSOR RECORDING (CLEANED)";
+                                badge.style.background = "#00b4d8";
+                            } else {
+                                badge.innerText = "CSV DATA";
+                                badge.style.background = "#ffaa00";
+                            }
+                        }
+                        const rows = data.rows !== undefined && data.rows !== null ? data.rows : "N/A";
+                        const cols = data.columns !== undefined && data.columns !== null ? data.columns : "N/A";
                         csvShapeInfo.innerText = `${rows} rows × ${cols} columns`;
 
-                        
                         csvColsList.innerHTML = "";
                         const xSelect = document.getElementById('x-axis-select');
                         const ySelect = document.getElementById('y-axis-select');
@@ -404,15 +365,14 @@
                                 optY.innerText = col;
                                 ySelect.appendChild(optY);
                             });
-                        }
 
-                        if (false) {
-                            data.column_names.forEach(col => {
-                                const tag = document.createElement("span");
-                                tag.className = "column-tag";
-                                tag.innerText = col;
-                                csvColsList.appendChild(tag);
-                            });
+                            // Smart defaults for sensor recordings: X -> Relative_Time_Sec, Y -> Sensor_1
+                            if (data.column_names.includes("Relative_Time_Sec")) {
+                                xSelect.value = "Relative_Time_Sec";
+                            }
+                            if (data.column_names.includes("Sensor_1")) {
+                                ySelect.value = "Sensor_1";
+                            }
                         }
                     } else {
                         cardCsvDetails.style.display = "none";
@@ -553,7 +513,10 @@
                 statusEl.innerText = "Thinking...";
                 const chatRes = await fetch(`${BACKEND_URL}/api/chat`, {
                     method: "POST", headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify({message: text})
+                    body: JSON.stringify({
+                        message: text + (activeDocContext || ""),
+                        document_id: activeDocId || ""
+                    })
                 });
                 const chatData = await chatRes.json();
                 const answer = chatData.answer || (chatData.error?.message ? "Error: " + chatData.error.message : "No response generated.");
@@ -561,6 +524,22 @@
                 if (!isSystemActive) return;
                 
                 chatLog.innerHTML += `<div class="ai-msg"><b>AI:</b> ${answer}</div>`;
+
+                if (chatData.fig) {
+                    const plotDiv = document.createElement('div');
+                    plotDiv.style.width = "100%";
+                    plotDiv.style.height = "350px";
+                    plotDiv.style.marginTop = "10px";
+                    plotDiv.style.marginBottom = "20px";
+                    plotDiv.id = 'plot-' + Date.now();
+                    chatLog.appendChild(plotDiv);
+                    try {
+                        const fig = typeof chatData.fig === 'string' ? JSON.parse(chatData.fig) : chatData.fig;
+                        Plotly.newPlot(plotDiv.id, fig.data, fig.layout, {responsive: true});
+                    } catch (e) {
+                        console.warn("Could not render chart", e);
+                    }
+                }
                 chatLog.scrollTop = chatLog.scrollHeight;
                 
                 // 3. TTS Speak

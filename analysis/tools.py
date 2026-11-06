@@ -95,7 +95,16 @@ class DataAccessLayer:
         return self._parse_bytes(path.read_bytes(), path.name)
 
     def _parse_bytes(self, content: bytes, filename: str) -> pd.DataFrame:
-        """Parse raw bytes as CSV with multi-encoding fallback."""
+        """Parse raw bytes as CSV or Excel with multi-encoding fallback."""
+        suffix = Path(filename).suffix.lower()
+        if suffix in (".xlsx", ".xlsm"):
+            try:
+                df = pd.read_excel(io.BytesIO(content), engine="openpyxl")
+                df.columns = [str(c).strip() for c in df.columns]
+                return df
+            except Exception as exc:
+                raise ValueError(f"Could not parse Excel content for '{filename}': {exc}") from exc
+
         for encoding in ("utf-8", "latin-1", "utf-8-sig"):
             try:
                 df = pd.read_csv(io.BytesIO(content), encoding=encoding)
