@@ -78,6 +78,13 @@ def predict(features, bundle: dict | None = None, top_k: int = 5) -> dict:
     row = _to_row(features)
 
     XA = _prepare(row, b["features_a"])
+    tr = b.get("a_transform")
+    if tr:   # Model A works on two-sided deviation from the healthy reference
+        ref = tr["reference"]
+        XA = pd.DataFrame({f"dev_{c}": (XA[c] - ref[c]).abs() / ref[c] for c in tr["columns"]}, index=XA.index)
+        row = row.copy()
+        for c in XA.columns:
+            row[c] = XA[c].values
     pA = b["model_a"].predict_proba(XA)[0]
     classes_a = list(b["model_a"].named_steps["clf"].classes_)
     p_damaged = float(pA[classes_a.index(1)])

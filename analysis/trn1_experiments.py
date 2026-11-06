@@ -80,6 +80,21 @@ def loco(make, X, y, groups, proba=True):
     return (P, classes) if proba else pred
 
 
+
+def loco_dev(make, df, cols=("f1_hz", "f2_hz", "f3_hz")):
+    """Two-sided deviation-from-healthy features. The healthy reference is the median of the healthy
+    recordings in the TRAINING fold only (so a held-out healthy beam never sets its own baseline)."""
+    y, g = df["_damaged"].values, df[CASE_COL].astype(str).values
+    P = np.zeros(len(y))
+    for tr, te in LeaveOneGroupOut().split(df, y, g):
+        trd = df.iloc[tr]
+        h = trd[trd["_damaged"] == 0][list(cols)].median()
+        tf = lambda d: pd.DataFrame({f"dev_{c}": (d[c] - h[c]).abs() / h[c] for c in cols}, index=d.index)
+        m = make()
+        m.fit(tf(trd), y[tr])
+        P[te] = m.predict_proba(tf(df.iloc[te]))[:, list(m.classes_).index(1)]
+    return P
+
 def case_vote_acc(cases, y, pred):
     d = pd.DataFrame({"c": cases, "y": y, "p": pred})
     r = d.groupby("c").apply(lambda g: int(g["y"].iloc[0] == g["p"].value_counts().idxmax()))
@@ -132,6 +147,22 @@ def main(argv=None):
         thr_rows.append(dict(threshold=thr, recall_healthy=cm[0, 0] / cm[0].sum(), recall_damaged=cm[1, 1] / cm[1].sum(), bal_acc=balanced_accuracy_score(yA, pr)))
     md += [f"### Threshold trade-off ({bestA}, extended features)\n", md_table(pd.DataFrame(thr_rows)), ""]
 
+    # two-sided deviation features (a frequency shift in EITHER direction counts as abnormal)
+    dev_rows = []
+    for m in ["logreg", "random_forest", "extra_trees"]:
+        pdv = loco_dev(lambda m=m: clf(m), df)
+        for thr in (0.5, 0.7):
+            pr = (pdv >= thr).astype(int)
+            cm = confusion_matrix(yA, pr, labels=[0, 1])
+            dev_rows.append(dict(model=m, threshold=thr, bal_acc=balanced_accuracy_score(yA, pr), auc=roc_auc_score(yA, pdv),
+                                 recall_healthy=cm[0, 0] / cm[0].sum(), recall_damaged=cm[1, 1] / cm[1].sum(),
+                                 **{f"{c} called damaged": float(pr[(grpA == c)].mean()) for c in ("3mm_M3", "2mm_M6")}))
+        LOG.info("A deviation features %-14s done", m)
+    md += ["### Model A with two-sided deviation-from-healthy features\n",
+           "Features are |f - healthy median| / healthy median for f1-f3, with the healthy median taken from the training folds only. "
+           "A drop in frequency (what a crack physically does) now counts as abnormal, as well as a rise. "
+           "Last two columns: share of that case's recordings called damaged.\n", md_table(pd.DataFrame(dev_rows)), ""]
+
     # --- B: severity ---
     dmg = df[df["_damaged"] == 1].reset_index(drop=True)
     yB, grpB = dmg["_severity"].values, dmg[CASE_COL].astype(str).values
@@ -154,7 +185,7 @@ def main(argv=None):
             LOG.info("B %-12s %-14s done", sname, m)
     B = pd.DataFrame(rowsB).sort_values("f1_macro", ascending=False)
     md += ["## 2. Model B: severity (damaged recordings only)\n", md_table(B), ""]
-    md += ["Current saved model for reference: random forest on base(5): balanced accuracy 0.783, macro F1 0.781, 18/21 cases right.", "",
+    md += ["Compare these rows with the saved model's scores in training_report.md (they are produced by the same folds).", "",
            "Selecting the winner here uses the same folds that score it, so its score is optimistic. Report it as such.", ""]
     text = "\n".join(md)
     args.report_dir.mkdir(parents=True, exist_ok=True)

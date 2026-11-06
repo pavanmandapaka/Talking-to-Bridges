@@ -81,7 +81,8 @@ RATIO_RE = re.compile(r"(_over_|ratio|_rel$|_rel_)", re.IGNORECASE)
 
 MODEL_NAMES = ["logreg", "random_forest", "gradient_boosting"]
 SIMPLICITY_RANK = {"logreg": 0, "random_forest": 1, "gradient_boosting": 2}   # tie-break: simpler wins
-FEATURE_SET_RANK = {"freq": 0, "freq_ratio": 1, "freq_amp": 2}
+FEATURE_SET_RANK = {"freq": 0, "freq_ratio": 1, "freq_dev": 1, "freq_amp": 2}
+FREQ3 = ["f1_hz", "f2_hz", "f3_hz"]
 # Amplitude features (Sensor_k_rms, _peak, ...) depend on sensor gain / DC offset and can reveal the
 # recording session instead of the damage. They are evaluated as a diagnostic but never selected
 # for the saved model unless --allow-amplitude is given.
@@ -214,6 +215,29 @@ def loco_predict(model_name: str, X: pd.DataFrame, y: np.ndarray, groups: np.nda
         for j, c in enumerate(m.named_steps["clf"].classes_):
             proba[te, np.where(classes == c)[0][0]] = p[:, j]
     return proba, classes
+
+
+def dev_features(d: pd.DataFrame, ref: dict, cols=FREQ3) -> pd.DataFrame:
+    """Two-sided relative deviation from the healthy reference: |f - healthy| / healthy.
+    A frequency drop (what a crack should cause) and a rise both count as abnormal."""
+    return pd.DataFrame({f"dev_{c}": (d[c] - ref[c]).abs() / ref[c] for c in cols}, index=d.index)
+
+
+def loco_predict_dev(model_name: str, df: pd.DataFrame, y: np.ndarray, groups: np.ndarray) -> np.ndarray:
+    """LOCO for Model A on deviation features. The healthy reference is the median of the healthy
+    recordings in the TRAINING fold only, so a held-out healthy beam never sets its own baseline."""
+    proba = np.zeros((len(y), 2))
+    for tr, te in LeaveOneGroupOut().split(df, y, groups):
+        trd = df.iloc[tr]
+        healthy = trd[trd["_damaged"] == 0]
+        if len(healthy) == 0 or len(np.unique(y[tr])) < 2:
+            raise RuntimeError("A training fold is missing a class; cannot continue.")
+        ref = {c: float(healthy[c].median()) for c in FREQ3}
+        m = fit_model(model_name, dev_features(trd, ref), y[tr])
+        p = m.predict_proba(dev_features(df.iloc[te], ref))
+        for j, c in enumerate(m.named_steps["clf"].classes_):
+            proba[te, int(c)] = p[:, j]
+    return proba
 
 
 def metrics_binary(y_true, proba_damaged, threshold: float = 0.5) -> dict:
@@ -389,6 +413,14 @@ def main(argv=None) -> int:
     # ---------------- Model A: undamaged vs damaged ----------------
     yA = df["_damaged"].values
     rowsA, oofA = evaluate_grid("A", df, yA, groups_all, sets)
+    for mname in MODEL_NAMES:   # Model A on two-sided deviation-from-healthy features
+        t0 = time.time()
+        pr_ = loco_predict_dev(mname, df, yA, groups_all)
+        met = metrics_binary(yA, pr_[:, 1])
+        met.update(model=mname, feature_set="freq_dev", n_features=len(FREQ3), seconds=round(time.time() - t0, 1))
+        rowsA.append(met)
+        oofA[(mname, "freq_dev")] = (pr_, np.array([0, 1]))
+        LOG.info("Model A | %-17s | %-10s | bal.acc %.3f | f1 %.3f", mname, "freq_dev", met["balanced_accuracy"], met["f1_macro"])
     eligible = lambda rows: [r for r in rows if args.allow_amplitude or r["feature_set"] != AMPLITUDE_SET]
     bestA = dict(pick_best(eligible(rowsA), "balanced_accuracy"))   # copy: the grid table stays at threshold 0.5
     probaA, classesA = oofA[(bestA["model"], bestA["feature_set"])]
@@ -425,17 +457,28 @@ def main(argv=None) -> int:
     majority_acc_B = float(pd.Series(yB).value_counts(normalize=True).max())
 
     # ---------------- final fit on ALL data + bundle ----------------
-    colsA, colsB = sets[bestA["feature_set"]], sets[bestB["feature_set"]]
-    final_A = fit_model(bestA["model"], df[colsA], yA)
+    colsB = sets[bestB["feature_set"]]
+    a_transform = None
+    if bestA["feature_set"] == "freq_dev":
+        ref = {c: float(df.loc[df["_damaged"] == 0, c].median()) for c in FREQ3}
+        a_transform = {"type": "abs_rel_dev", "reference": ref, "columns": FREQ3}
+        colsA = FREQ3                                   # raw inputs the caller must supply
+        XA_train = dev_features(df, ref)
+        final_A = fit_model(bestA["model"], XA_train, yA)
+        impA = feature_importances(final_A, list(XA_train.columns))
+    else:
+        colsA = sets[bestA["feature_set"]]
+        final_A = fit_model(bestA["model"], df[colsA], yA)
+        impA = feature_importances(final_A, colsA)
     final_B = fit_model(bestB["model"], dmg[colsB], yB)
-    impA, impB = feature_importances(final_A, colsA), feature_importances(final_B, colsB)
+    impB = feature_importances(final_B, colsB)
 
     medians = {c: float(df[c].median()) for c in sorted(set(colsA) | set(colsB))}
     bundle = {
         "version": 1,
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "sklearn_version": sklearn.__version__,
-        "model_a": final_A, "model_a_name": bestA["model"], "features_a": colsA, "importances_a": impA,
+        "model_a": final_A, "model_a_name": bestA["model"], "features_a": colsA, "importances_a": impA, "a_transform": a_transform,
         "model_b": final_B, "model_b_name": bestB["model"], "features_b": colsB, "importances_b": impB,
         "classes_a": {0: "Undamaged", 1: "Damaged"},
         "threshold_a": float(args.threshold_a),
@@ -501,6 +544,7 @@ Generated {bundle['created']} | scikit-learn {sklearn.__version__} | seed {SEED}
 
 ## Model A: Undamaged vs Damaged
 Selected (frequency-based sets only unless --allow-amplitude): **{bestA['model']}** on feature set **{bestA['feature_set']}** ({bestA['n_features']} features).
+`freq_dev` = two-sided deviation of f1-f3 from the healthy reference (median of the healthy training recordings), so a frequency drop and a rise both count as abnormal.
 
 {grid_md(rowsA, 'A')}
 
@@ -541,7 +585,7 @@ Top features: {topB}
 
 ## Honest limits
 {leak_note}
-- The model was chosen among {len(MODEL_NAMES) * len(sets)} combinations using the same leave-one-case-out scores that are reported, so the selected scores are slightly optimistic.
+- The model was chosen among {len(rowsA)} combinations (Model A) and {len(rowsB)} (Model B) using the same leave-one-case-out scores that are reported, so the selected scores are slightly optimistic.
 - Results apply to this 0.7 m cantilever beam, a single crack and a single boundary condition only.
 - Do not present these figures as guarantees.
 """
