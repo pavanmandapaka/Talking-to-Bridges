@@ -69,6 +69,8 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[ChunkResponse] = Field(default_factory=list)
     fig: str | None = None  # Plotly figure JSON when a chart_data tool result exists
+    # NEW-4 / NEW-5: the same numbers the assistant speaks (Interface C), for the results card.
+    assessment: dict[str, Any] | None = None
 
 
 class UploadResponse(BaseModel):
@@ -419,7 +421,13 @@ async def chat(request: ChatRequest):
         active_df = None
         if _uploaded_documents:
             doc_id = list(_uploaded_documents.keys())[0]
-            matching_files = list(DOCUMENTS_DIR.glob(f"{doc_id}_*"))
+            # An Excel upload leaves two files: the raw workbook and the cleaned CSV.
+            # Always load the cleaned CSV (Sensor_1..5 + Relative_Time_Sec), never the raw
+            # headerless workbook; glob order alone is not reliable.
+            matching_files = sorted(
+                DOCUMENTS_DIR.glob(f"{doc_id}_*"),
+                key=lambda path: (path.suffix.lower() != ".csv", path.name),
+            )
             if matching_files:
                 try:
                     active_df = await asyncio.to_thread(
@@ -431,10 +439,10 @@ async def chat(request: ChatRequest):
         # ------------------------------------------------------------------
         # 2. Analytical tool dispatch (ToolDispatcher)
         # ------------------------------------------------------------------
-        dispatch_result = None
+        dispatch_results = []
         try:
-            dispatch_result = await asyncio.to_thread(
-                dispatcher.detect_and_dispatch, clean_message, active_df
+            dispatch_results = await asyncio.to_thread(
+                dispatcher.detect_and_dispatch_all, clean_message, active_df
             )
         except Exception as disp_err:
             logger.warning("Dispatcher error (non-fatal): %s", disp_err)
@@ -477,17 +485,18 @@ async def chat(request: ChatRequest):
                 )
             )
 
-        if dispatch_result and dispatch_result.status == "success":
-            context_blocks.append(
-                f"[Analytical Tool: {dispatch_result.tool_name}]\n"
-                f"{dispatch_result.llm_summary}"
-            )
-        elif dispatch_result and dispatch_result.status == "error":
-            # Still surface the error to the LLM so it can explain to the user
-            context_blocks.append(
-                f"[Analytical Tool Error: {dispatch_result.tool_name}]\n"
-                f"{dispatch_result.message}"
-            )
+        for dispatch_result in dispatch_results:
+            if dispatch_result.status == "success":
+                context_blocks.append(
+                    f"[Analytical Tool: {dispatch_result.tool_name}]\n"
+                    f"{dispatch_result.llm_summary}"
+                )
+            else:
+                # Still surface the error to the LLM so it can explain to the user
+                context_blocks.append(
+                    f"[Analytical Tool Error: {dispatch_result.tool_name}]\n"
+                    f"{dispatch_result.message}"
+                )
 
         if context_blocks:
             context = "\n\n".join(context_blocks)
@@ -512,18 +521,33 @@ async def chat(request: ChatRequest):
 
         answer = await llm_service.generate(messages)
         chart_json = None
-        if (
-            dispatch_result
-            and dispatch_result.status == "success"
-            and dispatch_result.tool_name == "chart_data"
-        ):
-            candidate = dispatch_result.data.get("plot_json") if dispatch_result.data else None
-            if candidate and candidate != "{}":
-                chart_json = candidate
+        assessment = None
+        for dispatch_result in dispatch_results:
+            if dispatch_result.status != "success" or not dispatch_result.data:
+                continue
+            if dispatch_result.tool_name == "chart_data" and chart_json is None:
+                candidate = dispatch_result.data.get("plot_json")
+                if candidate and candidate != "{}":
+                    chart_json = candidate
+            elif dispatch_result.tool_name == "model_result" and assessment is None:
+                data = dispatch_result.data
+                if data.get("status") == "ok":
+                    assessment = {
+                        key: data.get(key)
+                        for key in (
+                            "model_available", "condition", "condition_confidence",
+                            "severity_mm", "severity_confidence", "severity_label",
+                            "top_parameters", "agreement", "agreement_note", "caveats",
+                        )
+                    }
+                    assessment["baseline_flag"] = (
+                        (data.get("baseline_comparison") or {}).get("overall_flag")
+                    )
         return ChatResponse(
             answer=answer,
             sources=[r.chunk for r in retrieved_chunks],
             fig=chart_json,
+            assessment=assessment,
         )
 
     except Exception as e:
@@ -561,7 +585,10 @@ async def execute_analytical_tool(request: ToolExecuteRequest):
     df = None
     if request.document_id:
         # Search for document file in DOCUMENTS_DIR matching document_id
-        matching_files = list(DOCUMENTS_DIR.glob(f"{request.document_id}_*"))
+        matching_files = sorted(
+            DOCUMENTS_DIR.glob(f"{request.document_id}_*"),
+            key=lambda path: (path.suffix.lower() != ".csv", path.name),
+        )  # cleaned CSV before the raw Excel upload
         if matching_files:
             try:
                 df = data_access.load_dataset(matching_files[0])
@@ -627,4 +654,3 @@ async def analyze_csv(
     except Exception as e:
         logger.error(f"Analyze CSV error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-

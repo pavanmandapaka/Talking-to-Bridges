@@ -731,58 +731,59 @@ def handle_correlation_analysis(
 
 
 # ---------------------------------------------------------------------------
-# 4.5  model_result  (Krishna's Week 7 placeholder)
+# 4.5  model_result  (NEW-4: trained model + healthy comparison, Interface C)
 # ---------------------------------------------------------------------------
 
 def handle_model_result(
     arguments: Dict[str, Any],
     df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-    """Return a structural condition prediction (placeholder/interface).
+    """Assess the uploaded recording with the trained TRN-1 model and the healthy baseline.
 
-    This is the interface contract for Krishna's ML inference engine.
-    Supports damage_class, severity, confidence, and contributing_parameters.
+    Flow: extract_features(recording) -> TRN-1 model -> compare_to_baseline (NEW-2).
+    Returns the Interface C fields (condition, condition_confidence, severity_mm,
+    severity_confidence, top_parameters, baseline_comparison, ...) plus the older fields
+    (predicted_class, confidence, damage_class, severity, contributing_parameters,
+    features_used, prediction_timestamp, model_note) so existing callers keep working.
+
+    The label column of the uploaded data is never read.  Without an uploaded recording
+    the result says so (status 'no_data'); nothing is invented.
     """
-    sensor_id = arguments["sensor_id"]
+    from datetime import datetime
+
+    from analysis.assessment import assess_recording, severity_texts
+
+    sensor_id = str(arguments.get("sensor_id") or "recording")
     target_variable = arguments.get("target_variable", "condition")
 
-    if df is not None:
-        sub_df = df
-        if "sensor_id" in df.columns:
-            sub_df = df[df["sensor_id"].astype(str) == str(sensor_id)]
-        if not sub_df.empty and target_variable in sub_df.columns:
-            latest = sub_df.iloc[-1]
-            features = [
-                c for c in sub_df.columns
-                if c not in {"timestamp", "sensor_id", target_variable, "DateTime"}
-            ]
-            ts_col = _resolve_time_column(sub_df, None)
-            ts_val = str(latest.get(ts_col, "latest")) if ts_col != "index" else "latest"
-            damage_cls = str(latest.get("Damage_Level", latest.get("condition", "Damaged")))
-            return {
-                "sensor_id": sensor_id,
-                "target_variable": target_variable,
-                "predicted_class": str(latest[target_variable]),
-                "damage_class": damage_cls,
-                "severity": "Medium" if "Damaged" in damage_cls else "Low",
-                "confidence": 0.92,
-                "features_used": features,
-                "contributing_parameters": features[:3] if features else [sensor_id],
-                "prediction_timestamp": ts_val,
-                "model_note": "Real data lookup - replace confidence with actual model output.",
-            }
+    result = assess_recording(df)
 
+    condition = result["condition"]
+    severity_mm = result["severity_mm"]
+    _, severity_word = severity_texts(severity_mm)
+    if condition == "Damaged":
+        damage_class = f"Damaged_{severity_mm}mm" if severity_mm else "Damaged"
+        severity = severity_word
+    elif condition == "Undamaged":
+        damage_class, severity = "Undamaged", "None"
+    else:
+        damage_class, severity = None, None
+
+    parameters = [p["feature"] for p in result["top_parameters"]]
     return {
+        **result,
         "sensor_id": sensor_id,
         "target_variable": target_variable,
-        "predicted_class": "Monitor",
-        "damage_class": "Moderate_Damage",
-        "severity": "Medium",
-        "confidence": 0.88,
-        "features_used": ["temperature", "stress", "deflection", "vibration"],
-        "contributing_parameters": ["vibration", "deflection"],
-        "prediction_timestamp": "2026-01-20",
-        "model_note": "Placeholder result - replace with Krishna's trained model in Week 7.",
+        "predicted_class": condition or "Unavailable",
+        "confidence": result["condition_confidence"] or 0.0,
+        "damage_class": damage_class,
+        "severity": severity,
+        "features_used": parameters,
+        "contributing_parameters": parameters,
+        "prediction_timestamp": datetime.now().isoformat(timespec="seconds"),
+        "model_note": result["message"] if result["message"] != "ok" else (
+            "Trained model result (leave-one-case-out evaluated); see caveats."
+        ),
     }
 
 
@@ -1328,8 +1329,10 @@ registry.register(ToolDefinition(
 registry.register(ToolDefinition(
     name="model_result",
     description=(
-        "Returns structural condition prediction / ML model inference result for a sensor. "
-        "Interface placeholder for Krishna's trained ML model (Week 7)."
+        "Assesses the uploaded sensor recording with the trained model and the healthy baseline: "
+        "is the structure damaged or undamaged (with confidence), the estimated severity "
+        "(1, 2 or 3 mm crack, with confidence), the parameters that indicate the damage, and "
+        "how it compares with the healthy condition. Needs an uploaded Excel recording."
     ),
     category="prediction",
     input_schema={
@@ -1337,11 +1340,11 @@ registry.register(ToolDefinition(
         "properties": {
             "sensor_id": {
                 "type": "string",
-                "description": "Sensor identifier for which a prediction is requested.",
+                "description": "Sensor / specimen identifier (the whole recording is analysed).",
             },
             "target_variable": {
                 "type": "string",
-                "description": "Target label the model predicts (e.g. 'condition').",
+                "description": "Kept for compatibility (default 'condition').",
                 "default": "condition",
             },
         },
@@ -1350,6 +1353,19 @@ registry.register(ToolDefinition(
     output_schema={
         "type": "object",
         "properties": {
+            "model_available":         {"type": "boolean"},
+            "condition":               {"type": ["string", "null"]},
+            "condition_confidence":    {"type": ["number", "null"]},
+            "severity_mm":             {"type": ["integer", "null"]},
+            "severity_confidence":     {"type": ["number", "null"]},
+            "severity_label":          {"type": ["string", "null"]},
+            "top_parameters":          {"type": "array"},
+            "baseline_comparison":     {"type": "object"},
+            "agreement":               {"type": "string"},
+            "agreement_note":          {"type": "string"},
+            "status":                  {"type": "string"},
+            "message":                 {"type": "string"},
+            "caveats":                 {"type": "array", "items": {"type": "string"}},
             "sensor_id":               {"type": "string"},
             "target_variable":         {"type": "string"},
             "predicted_class":         {"type": "string"},

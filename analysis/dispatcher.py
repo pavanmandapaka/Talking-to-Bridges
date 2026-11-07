@@ -242,6 +242,197 @@ def _detect_tool(query: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# NEW-4: routing for the professor's five questions
+# ---------------------------------------------------------------------------
+#   1 What is the current condition?          -> model_result
+#   2 Is the structure damaged?               -> model_result
+#   3 What parameters indicate the damage?    -> model_result (top_parameters)
+#   4 What is the estimated severity?         -> model_result
+#   5 How does it compare with the healthy    -> baseline + model_result + comparison chart
+#     condition?  ("show me the comparison")
+# Queries that clearly ask for another tool (chart words, anomalies, trend, correlation,
+# statistics) keep their old routing.
+
+_CHART_WORDS = {"chart", "plot", "graph", "visualize", "visualise", "draw", "figure"}
+_OTHER_TOOL_WORDS = {
+    "anomaly", "anomalies", "outlier", "outliers", "spike", "spikes",
+    "trend", "trends", "slope", "drift", "increasing", "decreasing", "rising", "falling",
+    "correlation", "correlate", "correlations", "relationship",
+    "statistics", "statistic", "average", "variance", "std", "minimum", "maximum",
+}
+_ASSESS_WORDS = {
+    "condition", "conditions", "damaged", "damage", "damages", "undamaged",
+    "severity", "severe", "severely", "serious", "seriously",
+    "crack", "cracks", "cracked", "health", "status", "state", "safe", "safety",
+    "verdict", "diagnosis", "diagnose", "assessment", "assess",
+    "classify", "classification", "classified", "predict", "prediction", "predicted",
+    "estimate", "estimated", "indicate", "indicates", "indicating", "indicator", "indicators",
+    "parameter", "parameters", "model",
+}
+# Questions about documents or explanations ("what does the paper say about cracks",
+# "why does a frequency drop indicate damage") stay with document retrieval.
+_EXPLAIN_WORDS = {
+    "document", "documents", "paper", "pdf", "article", "study", "literature", "theory",
+    "explain", "explains", "why", "define", "definition", "meaning", "mean", "means",
+    "affect", "affects", "cause", "causes", "caused", "typically", "generally",
+}
+# A comparison question that names a chart type gets that chart as its primary result.
+_SIGNAL_WORDS = {"signal", "signals", "waveform", "overlay"}
+_COMPARE_VERBS = {"compare", "compared", "comparing", "comparison", "comparisons", "versus", "vs", "against"}
+_HEALTHY_WORDS = {"healthy", "baseline", "undamaged", "reference", "normal"}
+_IS_HEALTHY = re.compile(r"\b(is|are|was|were)\b[^?.!]*\bhealthy\b|\bhow healthy\b")
+
+
+def _plan_tools(query: str, has_data: bool) -> Optional[List[Dict[str, Any]]]:
+    """Ordered tool plan for the five assessment questions, or None for the old routing.
+
+    Each entry: {"tool": name, "extra": {forced arguments}}.
+    """
+    token_list = _tokenize(query)
+    tokens = set(token_list)
+    if tokens & _CHART_WORDS or tokens & _OTHER_TOOL_WORDS or tokens & _EXPLAIN_WORDS:
+        return None
+
+    compare = tokens & _COMPARE_VERBS
+    healthy = tokens & _HEALTHY_WORDS
+    assess = tokens & _ASSESS_WORDS
+    baseline_words = tokens & {"baseline", "deviation", "deviations", "ranking", "reference"}
+    asks_is_healthy = bool(_IS_HEALTHY.search(query.lower())) and not baseline_words
+
+    if compare and (healthy or assess or tokens & {"comparison", "comparisons"}):
+        if not has_data:
+            return [{"tool": "model_result", "extra": {}}]
+        named = _detect_comparison(token_list)
+        chart_named = (named not in (None, "signals")) or bool(tokens & _SIGNAL_WORDS)
+        baseline_step = {"tool": "baseline", "extra": {}}
+        model_step = {"tool": "model_result", "extra": {}}
+        chart_step = {"tool": "chart_data", "extra": {"_comparison_default": "frequencies"}}
+        if chart_named:  # e.g. "compare the spectrum with healthy": the chart leads
+            return [chart_step, baseline_step, model_step]
+        return [baseline_step, model_step, chart_step]
+    if assess or asks_is_healthy:
+        return [{"tool": "model_result", "extra": {}}]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# NEW-4: plain-language summary of the model_result tool (what the LLM sees)
+# ---------------------------------------------------------------------------
+
+_FEATURE_NAMES = {
+    "f1_hz": "mode 1 frequency (f1)",
+    "f2_hz": "mode 2 frequency (f2)",
+    "f3_hz": "mode 3 frequency (f3)",
+    "f2_over_f1": "frequency ratio f2/f1",
+    "f3_over_f1": "frequency ratio f3/f1",
+}
+
+
+def _param_line(p: Dict[str, Any]) -> str:
+    feature = p.get("feature", "")
+    name = _FEATURE_NAMES.get(feature, feature)
+    unit = " Hz" if feature.endswith("_hz") else ""
+    parts = [name]
+    if p.get("value") is not None and p.get("healthy_typical") is not None:
+        parts.append(f"{p['value']:.4g}{unit} against a healthy {p['healthy_typical']:.4g}{unit}")
+    if p.get("change_percent") is not None:
+        change = round(p["change_percent"], 1) + 0.0  # avoids "-0.0"
+        parts.append(f"{change:+.1f} percent")
+    if p.get("outside") is True:
+        parts.append("clearly different from healthy")
+    elif p.get("outside") is False:
+        parts.append("within normal healthy variation")
+    return "; ".join(parts)
+
+
+_ANSWER_GUIDE = (
+    "How to answer: use plain language for a non-expert, 3 to 6 sentences, and only the numbers "
+    "above. Say the condition and how sure the model is, name the main parameters and what "
+    "changed against healthy, give the severity, and mention one limit. Do not use the words "
+    "'tool' or 'JSON', and do not quote importance scores or 'spreads'. Only call a parameter "
+    "an indicator of damage when it is marked 'clearly different from healthy'; say small "
+    "changes marked 'within normal healthy variation' are normal. Do not claim that one "
+    "frequency change proves a particular crack size.\n"
+    "Report the direction of every change exactly as given above (higher or lower); in the lab "
+    "data a frequency can move either way when a crack is present, so never claim that damage "
+    "must lower a frequency, and do not explain the change with a physical cause unless the "
+    "numbers above support it.\n"
+    "Example (damaged): 'The beam looks damaged; the model is [X] percent sure. Its [feature] is "
+    "[Y] percent [higher/lower] than the healthy value, and the healthy comparison also flags "
+    "it as different. The estimated severity is [low/medium/high] (a [N] mm crack), with [Z] "
+    "percent confidence. This only applies to this lab beam.'\n"
+    "Example (healthy): 'The beam looks undamaged; the model is [X] percent sure, and the bending "
+    "frequencies are inside the healthy range. There is no severity because no damage was found. "
+    "Very small cracks near the free end can be hard to see, though.' Replace every [bracket] "
+    "with the real numbers above; never reuse example numbers."
+)
+
+
+def _model_result_summary(data: Dict[str, Any]) -> str:
+    """Plain-language block for the assessment questions (Interface C)."""
+    lines = ["[ANALYTICAL RESULT: model_result]"]
+    status = data.get("status", "ok")
+    if status != "ok":
+        lines.append(f"No assessment was possible: {data.get('message', '')}")
+        lines.append(
+            "Tell the user this plainly and, if no file is uploaded, ask them to upload an "
+            "Excel sensor recording (.xlsx or .xlsm). Do not guess a condition."
+        )
+        return "\n".join(lines)
+
+    baseline = data.get("baseline_comparison") or {}
+    flag = baseline.get("overall_flag", "unavailable")
+    n_h = baseline.get("n_healthy") or {}
+
+    if data.get("model_available"):
+        cc = data.get("condition_confidence")
+        conf = f" (confidence {cc * 100:.0f} percent)" if cc is not None else ""
+        lines.append(f"Condition (trained model): {data.get('condition')}{conf}")
+        if data.get("condition") == "Damaged":
+            sc = data.get("severity_confidence")
+            sconf = f" (confidence {sc * 100:.0f} percent)" if sc is not None else ""
+            if data.get("severity_label"):
+                lines.append(f"Estimated severity: {data['severity_label']}{sconf}")
+            else:
+                lines.append("Estimated severity: the model gave no severity for this recording.")
+        else:
+            lines.append("Estimated severity: none, because no damage was found.")
+    else:
+        lines.append(
+            "Condition (trained model): NOT AVAILABLE. "
+            f"{data.get('model_error') or 'The model could not be used.'} "
+            "Say that the damage model is not available and answer from the healthy comparison only."
+        )
+
+    params = data.get("top_parameters") or []
+    if params:
+        lines.append("Parameters that stand out:")
+        lines.extend(f"  - {_param_line(p)}" for p in params[:6])
+
+    if flag == "unavailable":
+        lines.append(f"Healthy comparison: unavailable. {baseline.get('summary', '')}")
+    else:
+        lines.append(f"Healthy comparison: overall flag {flag}. {baseline.get('summary', '')}")
+        if n_h:
+            lines.append(
+                f"The healthy baseline uses {n_h.get('recordings', 0)} healthy recording(s) "
+                f"from {n_h.get('cases', 0)} case(s), so the healthy range is uncertain."
+            )
+
+    if data.get("agreement") == "disagree":
+        lines.append(f"IMPORTANT, the results disagree: {data.get('agreement_note', '')} "
+                     "Say this plainly and report both results.")
+    elif data.get("agreement") == "agree":
+        lines.append(f"Consistency: {data.get('agreement_note', '')}")
+
+    caveats = data.get("caveats") or []
+    if caveats:
+        lines.append("Limits to mention (pick the most relevant one): " + " ".join(caveats))
+    lines.append(_ANSWER_GUIDE)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -267,19 +458,43 @@ class ToolDispatcher:
     ) -> Optional[DispatchResult]:
         """Detect analytical intent in query and, if found, execute the tool.
 
-        Args:
-            query: The raw user query string.
-            df:    Optional active DataFrame (from the most recently uploaded file).
-
-        Returns:
-            DispatchResult if an analytical tool was invoked, else None.
+        Returns the first (primary) DispatchResult, or None when no tool matches.
+        Use detect_and_dispatch_all() to get every result for the question
+        (for example the baseline text AND the comparison chart).
         """
-        tool_name = _detect_tool(query)
-        if tool_name is None:
-            return None
+        results = self.detect_and_dispatch_all(query, df)
+        return results[0] if results else None
 
-        arguments = self._build_arguments(tool_name, query, df)
-        return self.dispatch(tool_name, arguments, df)
+    def detect_and_dispatch_all(
+        self,
+        query: str,
+        df: Optional[pd.DataFrame] = None,
+    ) -> List[DispatchResult]:
+        """Run every tool the question needs, in order (empty list when none match).
+
+        The five assessment questions (condition, damaged?, parameters, severity,
+        comparison with healthy) use _plan_tools; everything else uses the single-tool
+        keyword routing as before.
+        """
+        plan = _plan_tools(query, has_data=df is not None)
+        if plan is None:
+            tool_name = _detect_tool(query)
+            if tool_name is None:
+                return []
+            plan = [{"tool": tool_name, "extra": {}}]
+
+        results: List[DispatchResult] = []
+        for step in plan:
+            arguments = self._build_arguments(step["tool"], query, df)
+            default_mode = step["extra"].get("_comparison_default")
+            if step["tool"] == "chart_data" and default_mode:
+                mode = arguments.get("comparison")
+                explicit_signals = bool(set(_tokenize(query)) & _SIGNAL_WORDS)
+                # no chart type named in the question -> the f1-f3 bars (NEW-3)
+                if mode is None or (mode == "signals" and not explicit_signals):
+                    arguments["comparison"] = default_mode
+            results.append(self.dispatch(step["tool"], arguments, df))
+        return results
 
     def dispatch(
         self,
@@ -493,19 +708,7 @@ class ToolDispatcher:
             )
 
         if tool_name == "model_result":
-            damage_str = f"  |  Damage Class: {data.get('damage_class')}" if data.get('damage_class') else ""
-            sev_str = f"  |  Severity: {data.get('severity')}" if data.get('severity') else ""
-            contrib = data.get('contributing_parameters', [])
-            contrib_str = f"\nContributing parameters: {', '.join(contrib)}" if contrib else ""
-            return (
-                f"[ANALYTICAL RESULT: model_result]\n"
-                f"Sensor: {data.get('sensor_id')}  |  "
-                f"Target: {data.get('target_variable')}\n"
-                f"Predicted condition: {data.get('predicted_class')}{damage_str}{sev_str}  |  "
-                f"Confidence: {data.get('confidence', 0)*100:.0f}%"
-                f"{contrib_str}\n"
-                f"Note: {data.get('model_note', '')}"
-            )
+            return _model_result_summary(data)
 
         if tool_name == "chart_data":
             shown = (
