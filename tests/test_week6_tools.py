@@ -372,15 +372,17 @@ class TestCorrelationAnalysis:
 
 class TestModelResult:
     def test_real_data_condition_lookup(self, fixture_df):
-        res = registry.execute(
-            "model_result",
-            {"sensor_id": "S01", "target_variable": "condition"},
-            df=fixture_df,
-        )
-        assert res["status"] == "success"
-        d = res["data"]
-        assert d["predicted_class"] in {"Normal", "Monitor", "Alert"}
-        assert d["confidence"] > 0
+    # NEW-4: the label column is no longer read. This fixture is not a sensor recording.
+       res = registry.execute(
+        "model_result",
+        {"sensor_id": "S01", "target_variable": "condition"},
+        df=fixture_df,
+    )
+       assert res["status"] == "success"
+       d = res["data"]
+       assert d["status"] == "not_a_recording"
+       assert d["predicted_class"] == "Unavailable"
+       assert d["condition"] is None
 
     def test_placeholder_fallback(self):
         res = registry.execute("model_result", {"sensor_id": "S01"})

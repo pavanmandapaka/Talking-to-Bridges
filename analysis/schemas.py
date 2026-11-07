@@ -214,7 +214,7 @@ class CorrelationAnalysisOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 5. model_result  (placeholder - Krishna's Week 7 ML inference)
+# 5. model_result  (NEW-4: trained model + healthy comparison, Interface C)
 # ---------------------------------------------------------------------------
 
 class ModelResultInput(BaseModel):
@@ -239,7 +239,7 @@ class ModelResultOutput(BaseModel):
     confidence: float
     features_used: List[str] = Field(default_factory=list)
     prediction_timestamp: str
-    model_note: str = "Placeholder result - replace with Krishna's trained model in Week 7."
+    model_note: str = ""
     damage_class: Optional[str] = Field(
         default=None,
         description="Categorical damage classification (e.g. 'Damaged_3mm', 'Undamaged').",
@@ -252,6 +252,49 @@ class ModelResultOutput(BaseModel):
         default_factory=list,
         description="Sensors or features contributing to the predicted condition.",
     )
+
+    # ---- NEW-4: Interface C (shared with NEW-5, the results card) ----
+    model_available: bool = Field(
+        default=False,
+        description="True when the trained TRN-1 model produced the condition.",
+    )
+    model_error: str = Field(default="", description="Why the model could not run (if it could not).")
+    condition: Optional[str] = Field(
+        default=None, description="'Damaged' or 'Undamaged' (None when no model result)."
+    )
+    condition_confidence: Optional[float] = Field(
+        default=None, description="Confidence in the condition, 0 to 1."
+    )
+    severity_mm: Optional[int] = Field(
+        default=None, description="Crack depth class 1, 2 or 3 mm; None unless Damaged."
+    )
+    severity_confidence: Optional[float] = Field(
+        default=None, description="Confidence in the severity, 0 to 1."
+    )
+    severity_label: Optional[str] = Field(
+        default=None, description="Plain-language severity, e.g. 'medium (2 mm crack ...)'."
+    )
+    top_parameters: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Features that drove the decision: model importances plus the top deviations "
+            "from the healthy baseline (feature, source, importance, value, healthy_typical, "
+            "change_percent, score)."
+        ),
+    )
+    baseline_comparison: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Interface B result for the same recording (overall_flag, deviations, ...).",
+    )
+    agreement: str = Field(
+        default="unknown", description="'agree', 'disagree' or 'unknown' (model vs healthy baseline)."
+    )
+    agreement_note: str = ""
+    status: str = Field(
+        default="ok", description="ok | no_data | not_a_recording | features_failed"
+    )
+    message: str = ""
+    caveats: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

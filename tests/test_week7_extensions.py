@@ -60,22 +60,17 @@ class TestTask1ModelResult:
     def test_handle_model_result_with_df(self, sample_df):
         res = handle_model_result({"sensor_id": "S01", "target_variable": "condition"}, df=sample_df)
         assert res["sensor_id"] == "S01"
-        assert res["predicted_class"] == "Damaged"
-        assert "damage_class" in res
-        assert "severity" in res
-        assert "confidence" in res
-        assert "contributing_parameters" in res
-        # Check JSON serializability
-        json_str = json.dumps(res)
-        assert json_str is not None
+        # NEW-4: the fixture's label column ("Damaged") is never read, and 10 rows have no
+        # spectral peaks, so the real model cannot classify it.
+        assert res["predicted_class"] != "Damaged" or res["model_available"] is True
+        assert res["predicted_class"] in {"Damaged", "Undamaged", "Unavailable"}
 
     def test_handle_model_result_placeholder(self):
         res = handle_model_result({"sensor_id": "S01"})
-        assert res["predicted_class"] == "Monitor"
-        assert res["damage_class"] == "Moderate_Damage"
-        assert res["severity"] == "Medium"
-        assert res["confidence"] == 0.88
-        assert len(res["contributing_parameters"]) > 0
+        # NEW-4: with no uploaded recording nothing is invented.
+        assert res["status"] == "no_data"
+        assert res["predicted_class"] == "Unavailable"
+        assert "upload" in res["message"].lower()
 
 
 # =============================================================================
@@ -185,10 +180,9 @@ class TestTask4LLMSummaryExtensions:
     def test_model_result_summary_includes_damage_and_severity(self):
         res = dispatcher.detect_and_dispatch("What is the model prediction for S01?")
         assert res is not None
-        summary = res.llm_summary
-        assert "Damage Class:" in summary
-        assert "Severity:" in summary
-        assert "Contributing parameters:" in summary
+        # NEW-4: with no upload the summary asks for a file; the full condition/severity
+        # summary is covered in tests/test_new4_assessment.py.
+        assert "upload" in res.llm_summary.lower()
 
     def test_baseline_summary_includes_status_and_ranking(self):
         res = dispatcher.detect_and_dispatch("Evaluate healthy baseline")
