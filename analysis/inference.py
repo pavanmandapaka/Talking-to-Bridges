@@ -20,6 +20,7 @@ The feature row must come from the same feature code used for training
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
@@ -60,8 +61,20 @@ def _prepare(row: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     if missing:
         raise KeyError(f"Feature row is missing required features: {missing}")
     X = row[cols].apply(pd.to_numeric, errors="coerce").astype(float)
-    X = X.replace([np.inf, -np.inf], np.nan)   # the saved pipeline imputes NaN with the training median
-    return X
+    X = X.replace([np.inf, -np.inf], np.nan)
+    # The feature extractor writes 0.0 when no spectral peak is found. A 0.0, negative or NaN
+    # frequency must never reach the model as if it were a real measurement.
+    for c in cols:
+        if re.match(r"^f[1-9]_hz$", c, re.IGNORECASE) or "_over_" in c:
+            X.loc[X[c] <= 0, c] = np.nan
+    # f1-f3 carry almost all of the decision, so a median fill would invent the answer.
+    absent = [c for c in cols if re.match(r"^f[1-9]_hz$", c, re.IGNORECASE) and X[c].isna().any()]
+    if absent:
+        raise ValueError(
+            f"No valid spectral peak found for {absent}; cannot classify this recording. "
+            "Check the recording (length, noise, hit) or the modal search bands."
+        )
+    return X   # any other NaN (for example a ratio) is filled with the training median by the saved pipeline
 
 
 def _top(importances: Mapping[str, float], row: pd.DataFrame, k: int) -> list[dict]:
