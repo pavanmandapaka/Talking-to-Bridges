@@ -112,3 +112,12 @@ def test_card_renders_in_streamlit():
     labels = [m.label for m in at.metric]
     assert labels == ["Condition", "Severity", "Healthy-baseline check"]
     assert [m.value for m in at.metric][:2] == ["Damaged", "Low (1 mm crack)"]
+
+
+@pytest.mark.parametrize("page", ["ui/main.py", "frontend/app.py"])
+def test_both_chat_pages_draw_the_card(page):
+    """The repo has two copies of the chat page; both must show the card."""
+    text = (Path(__file__).resolve().parent.parent / page).read_text(encoding="utf-8")
+    assert "from ui.results_card import render_results_card" in text
+    assert text.count("render_results_card(") == 2
+    assert 'data.get("assessment")' in text and 'msg_data["assessment"]' in text
