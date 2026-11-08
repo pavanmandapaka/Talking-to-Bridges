@@ -24,6 +24,7 @@ import pandas as pd
 from rag.document_loader import load_document
 from rag.csv_processor import get_csv_summary, EmptyCSVError, CorruptedCSVError
 import streamlit as st
+from ui.results_card import render_results_card
 
 st.set_page_config(page_title="Talking to Bridges", layout="wide")
 
@@ -227,6 +228,8 @@ for msg_idx, msg in enumerate(st.session_state.messages):
                     if src.get("text"):
                         st.caption(src.get("text"))
 
+        if msg.get("assessment"):
+            render_results_card(msg["assessment"], key=f"chat_card_{msg_idx}")
         if "fig" in msg:
             st.plotly_chart(msg["fig"], width='stretch', key=f"chat_fig_{msg_idx}")
         if "audio" in msg:
@@ -329,6 +332,11 @@ if user_query:
                 sources = data.get("sources", [])
                 st.markdown(answer)
 
+                # Results card (NEW-5): same numbers as the answer, from the assessment field
+                assessment = data.get("assessment")
+                if assessment:
+                    render_results_card(assessment, key=f"chat_card_new_{len(st.session_state.messages)}")
+
                 # Render plot if backend generated one
                 fig = None
                 fig_json = data.get("fig")
@@ -367,6 +375,8 @@ if user_query:
 
                 # Store to history
                 msg_data = {"role": "assistant", "content": answer, "sources": sources}
+                if assessment:
+                    msg_data["assessment"] = assessment
                 if fig:
                     msg_data["fig"] = fig
                 if audio_bytes:
