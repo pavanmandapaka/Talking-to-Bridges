@@ -32,12 +32,27 @@ import pandas as pd
 DEFAULT_BUNDLE = Path(__file__).resolve().parents[1] / "models" / "damage_model_bundle.joblib"
 
 
+def _ensure_compat(obj: Any) -> None:
+    """Ensure cross-version scikit-learn unpickling compatibility."""
+    if obj is None:
+        return
+    if hasattr(obj, "steps"):
+        for _, step in obj.steps:
+            _ensure_compat(step)
+    if "LogisticRegression" in type(obj).__name__ and not hasattr(obj, "multi_class"):
+        obj.multi_class = "auto"
+
+
 @lru_cache(maxsize=2)
 def _load(path: str) -> dict:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Model bundle not found: {p}. Run `python -m analysis.train_models` first.")
-    return joblib.load(p)
+    bundle = joblib.load(p)
+    if isinstance(bundle, dict):
+        _ensure_compat(bundle.get("model_a"))
+        _ensure_compat(bundle.get("model_b"))
+    return bundle
 
 
 def load_bundle(path: str | Path | None = None) -> dict:
@@ -57,6 +72,16 @@ def _to_row(features: Mapping[str, Any] | pd.Series | pd.DataFrame) -> pd.DataFr
 
 
 def _prepare(row: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    # Auto-derive modal ratios if required by cols but omitted from input row
+    if "f2_over_f1" in cols and "f2_over_f1" not in row.columns and "f1_hz" in row.columns and "f2_hz" in row.columns:
+        f1 = pd.to_numeric(row["f1_hz"], errors="coerce")
+        f2 = pd.to_numeric(row["f2_hz"], errors="coerce")
+        row["f2_over_f1"] = np.where(f1 > 0, f2 / f1, np.nan)
+    if "f3_over_f1" in cols and "f3_over_f1" not in row.columns and "f1_hz" in row.columns and "f3_hz" in row.columns:
+        f1 = pd.to_numeric(row["f1_hz"], errors="coerce")
+        f3 = pd.to_numeric(row["f3_hz"], errors="coerce")
+        row["f3_over_f1"] = np.where(f1 > 0, f3 / f1, np.nan)
+
     missing = [c for c in cols if c not in row.columns]
     if missing:
         raise KeyError(f"Feature row is missing required features: {missing}")
@@ -101,7 +126,7 @@ def predict(features, bundle: dict | None = None, top_k: int = 5) -> dict:
     pA = b["model_a"].predict_proba(XA)[0]
     classes_a = list(b["model_a"].named_steps["clf"].classes_)
     p_damaged = float(pA[classes_a.index(1)])
-    thr = float(b.get("threshold_a", 0.5))
+    thr = float(np.clip(b.get("threshold_a", 0.5), 1e-6, 1.0 - 1e-6))
     damaged = p_damaged >= thr
     # rescale so the chosen threshold maps to 0.5: the confidence of the predicted class is then always >= 0.5
     p_adj = 0.5 * p_damaged / thr if p_damaged < thr else 0.5 + 0.5 * (p_damaged - thr) / (1.0 - thr)

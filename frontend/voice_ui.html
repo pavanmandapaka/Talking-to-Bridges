@@ -310,11 +310,25 @@
     <div id="chat-log"></div>
 
     <script>
-        const BACKEND_URL = "http://127.0.0.1:8001";
+        const BACKEND_URL = (window.location.origin && window.location.origin.startsWith("http")) ? window.location.origin : "http://127.0.0.1:8000";
 
         const orb = document.getElementById('orb');
         const statusEl = document.getElementById('status');
         const chatLog = document.getElementById('chat-log');
+        
+        function formatMarkdown(text) {
+            if (!text) return '';
+            let safe = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            safe = safe.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            safe = safe.replace(/__(.*?)__/g, '<strong>$1</strong>');
+            safe = safe.replace(/\*([^\*\n]+)\*/g, '<em>$1</em>');
+            safe = safe.replace(/`([^`]+)`/g, '<code>$1</code>');
+            safe = safe.replace(/\n/g, '<br/>');
+            return safe;
+        }
         
         let mediaRecorder;
         let audioChunks = [];
@@ -588,7 +602,7 @@
                 
                 if (!isSystemActive) return;
                 
-                chatLog.innerHTML += `<div class="ai-msg"><b>AI:</b> ${answer}</div>`;
+                chatLog.innerHTML += `<div class="ai-msg"><b>AI:</b> ${formatMarkdown(answer)}</div>`;
 
                 if (chatData.fig) {
                     const plotDiv = document.createElement('div');
@@ -672,7 +686,7 @@
                     // Add explanation to chat
                     const aiMsg = document.createElement('div');
                     aiMsg.className = 'ai-msg';
-                    aiMsg.innerHTML = '<strong>System:</strong><br/>' + data.explanation;
+                    aiMsg.innerHTML = '<strong>System:</strong><br/>' + formatMarkdown(data.explanation);
                     chatLog.appendChild(aiMsg);
                     
                     // Create Plotly div

@@ -1,4 +1,5 @@
 import os
+import re
 import base64
 import requests
 import asyncio
@@ -11,6 +12,59 @@ load_dotenv()
 # Set your preferred engine here or in the .env file
 # Options: "elevenlabs", "edge", "piper"
 DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")
+
+# ---------------------------------------------------------
+# TEXT CLEANING FOR SPEECH (Removes markdown / asterisks)
+# ---------------------------------------------------------
+def clean_text_for_speech(text: str) -> str:
+    """Clean markdown formatting, asterisks, and noisy symbols so TTS speaks natural English."""
+    if not text:
+        return ""
+
+    # 1. Remove fenced code blocks ```...```
+    text = re.sub(r"```[\s\S]*?```", "", text)
+
+    # 2. Inline code backticks: `code` -> code
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+
+    # 3. Markdown links: [label](url) -> label
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+
+    # 4. Headers: ### Header -> Header
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+
+    # 5. Bold & italic formatting (***text***, **text**, *text*, ___text___, __text__)
+    text = re.sub(r"\*{3}(.*?)\*{3}", r"\1", text)
+    text = re.sub(r"_{3}(.*?)_{3}", r"\1", text)
+    text = re.sub(r"\*{2}(.*?)\*{2}", r"\1", text)
+    text = re.sub(r"_{2}(.*?)_{2}", r"\1", text)
+    text = re.sub(r"\*([^*\n]+)\*", r"\1", text)
+
+    # 6. Any remaining standalone asterisks (* or **)
+    text = text.replace("*", "")
+
+    # 7. Tables: remove divider rows like |---|---|
+    text = re.sub(r"\|[-:\s|]+\|", "", text)
+    # Replace table pipe delimiters with commas/spaces for natural speech cadence
+    text = re.sub(r"\|", " , ", text)
+
+    # 8. Blockquotes: > Quote -> Quote
+    text = re.sub(r"^>\s+", "", text, flags=re.MULTILINE)
+
+    # 9. Convert Sensor_1 .. Sensor_5 to "Sensor 1" so TTS does not say "Sensor underscore 1"
+    text = re.sub(r"\bSensor_(\d+)\b", r"Sensor \1", text)
+
+    # 10. Clean multiple underscores
+    text = re.sub(r"_{2,}", " ", text)
+
+    # 11. Bullet point markers at line start
+    text = re.sub(r"^\s*[-+]\s+", "", text, flags=re.MULTILINE)
+
+    # 12. Normalize multiple spaces and extra newlines
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text)
+
+    return text.strip()
 
 # ---------------------------------------------------------
 # PIPER INITIALIZATION (Loads once on startup if chosen)
@@ -136,19 +190,23 @@ def generate_speech(text: str, engine: str = None) -> tuple[str, str]:
     if not text or not text.strip():
         raise ValueError("Cannot synthesize speech from empty text.")
 
+    cleaned_text = clean_text_for_speech(text)
+    if not cleaned_text:
+        cleaned_text = text.strip()
+
     engine = engine or DEFAULT_TTS_ENGINE
     
     print(f"[TTS Service] Generating speech using engine: {engine}")
     
     try:
         if engine == "elevenlabs":
-            return _speak_elevenlabs(text)
+            return _speak_elevenlabs(cleaned_text)
         elif engine == "edge":
-            return _speak_edge(text)
+            return _speak_edge(cleaned_text)
         elif engine == "piper":
-            return _speak_piper(text)
+            return _speak_piper(cleaned_text)
         else:
             raise ValueError(f"Unknown engine: {engine}")
     except Exception as e:
         print(f"[TTS Service Error] {e}. Falling back to Piper...")
-        return _speak_piper(text)
+        return _speak_piper(cleaned_text)

@@ -4,7 +4,10 @@ import threading
 # Fix for OpenMP duplicate library error on Windows/Anaconda
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-from faster_whisper import WhisperModel
+try:
+    from faster_whisper import WhisperModel
+except ImportError:
+    WhisperModel = None
 
 _model = None
 _device = None
@@ -14,6 +17,8 @@ _lock = threading.Lock()
 def _load(device: str):
     """Load the Whisper model on the given device ("cuda" or "cpu")."""
     global _model, _device
+    if WhisperModel is None:
+        raise RuntimeError("faster-whisper is not installed. Please install faster-whisper to use speech-to-text.")
     if device == "cuda":
         _model = WhisperModel("base", device="cuda", compute_type="float16")
     else:
